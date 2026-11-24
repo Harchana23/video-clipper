@@ -81,9 +81,9 @@ if ((Test-Path $Config) -and -not $ResetPassword) {
         }
         if (-not $plain) { throw 'The password is empty.' }
     }
-    # the password goes in on stdin as UTF-8 bytes (PS 5.1 would pipe ASCII and turn non-ASCII into '?'), never on a command line
+    # the password goes in on stdin as UTF-8 bytes (PS 5.1 would pipe ASCII and turn non-ASCII into '?'; utf-8-sig drops the BOM it may prepend), never on a command line
     $OutputEncoding = New-Object Text.UTF8Encoding $false
-    $hash = ($plain | & $Py -c "import sys; from clipper.auth import hash_password; print(hash_password(sys.stdin.buffer.read().rstrip(bytes([13, 10])).decode('utf-8')))").Trim()
+    $hash = ($plain | & $Py -c "import sys; from clipper.auth import hash_password; print(hash_password(sys.stdin.buffer.read().rstrip(bytes([13, 10])).decode('utf-8-sig')))").Trim()
     if ($LASTEXITCODE -ne 0 -or -not $hash) { throw 'Could not hash the password.' }
     $secret = (& $Py -c "import secrets; print(secrets.token_urlsafe(32))").Trim()
     $plain = $null
