@@ -132,7 +132,7 @@
   }
 
   // --- re-render status: poll /api/jobs while any clip is busy ---------------------
-  const busy = new Set();
+  const busy = new Set([...root.querySelectorAll("[data-busy]")].map((c) => Number(c.dataset.id)));  // seeded: a re-render that ends before the first poll still reloads
   let timer = null;
   const showBusy = (card, on) => { card.querySelector(".rp-busy").hidden = !on; };
   async function poll() {

@@ -2,22 +2,25 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import tempfile
 import threading
 import time
 import uuid
 import zipfile
+
+import anyio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import get_args
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.background import BackgroundTask
 
 from clipper import db
 from clipper.auth import SESSION_MAX_AGE, Lockout, check_session, make_session, verify_password
@@ -30,6 +33,8 @@ from clipper.worker import Worker, job_dir
 HERE = Path(__file__).parent
 UPLOAD_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 CHUNK = 1024 * 1024
+STALE_ZIP_SECONDS = 3600
+log = logging.getLogger(__name__)
 VIDEO_TYPES = {"talk": "Talk show", "gaming": "Gaming", "movie": "Movie"}
 LENGTHS = {"auto": "Auto (30–90s)", "short": "Under 30s", "medium": "30–60s", "long": "60–90s"}
 STYLES = {"bold_white": "Bold White", "yellow_pop": "Yellow Pop"}
@@ -52,6 +57,26 @@ DELETE_BUSY = "This clip is being re-rendered."
 def _mmss(t: float) -> str:
     t = int(t)
     return f"{t // 3600}:{t // 60 % 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+
+
+async def stream_and_delete(path: Path):
+    """Stream a file, then remove it, even when the client disconnects (the stream is closed or cancelled)."""
+    try:
+        with open(path, "rb") as f:
+            while chunk := await anyio.to_thread.run_sync(f.read, CHUNK):
+                yield chunk
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def sweep_stale_zips(d: Path, now: float) -> None:
+    """Temp zips a crash or a never-started stream left behind (old enough not to be a download in progress)."""
+    for f in d.glob("*.zip.tmp"):
+        try:
+            if now - f.stat().st_mtime > STALE_ZIP_SECONDS:
+                f.unlink()
+        except OSError:
+            pass
 
 
 def attachment(name: str) -> dict:
@@ -339,6 +364,7 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
                    for n, c in enumerate(rendered_clips(job_id), 1)]
         if not entries:
             raise HTTPException(404)
+        sweep_stale_zips(job_dir(settings, job_id), time.time())
         with tempfile.NamedTemporaryFile(dir=job_dir(settings, job_id), suffix=".zip.tmp", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         try:
@@ -348,9 +374,9 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
         except BaseException:
             tmp_path.unlink(missing_ok=True)
             raise
-        return FileResponse(tmp_path, media_type="application/zip",
-                            headers=attachment(f"{safe_filename(job['title'] or 'clips')}.zip"),
-                            background=BackgroundTask(tmp_path.unlink, missing_ok=True))
+        headers = {**attachment(f"{safe_filename(job['title'] or 'clips')}.zip"),
+                   "Content-Length": str(os.path.getsize(tmp_path))}
+        return StreamingResponse(stream_and_delete(tmp_path), media_type="application/zip", headers=headers)
 
     @app.post("/clips/{clip_id}/delete")
     def clip_delete(clip_id: int):
@@ -359,7 +385,10 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
             raise HTTPException(409, DELETE_BUSY)
         db.delete_clip(conn, clip_id)
         for f in (job_dir(settings, job["id"]) / "clips").glob(f"{clip_id}_*"):  # "5_" never matches clip 55's files
-            f.unlink(missing_ok=True)
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:  # e.g. still open for playback on Windows; the row is already gone, so don't 500
+                log.warning("could not delete %s", f, exc_info=True)
         return {"ok": True}
 
     @app.get("/api/clips/{clip_id}/words")

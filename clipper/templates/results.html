@@ -16,7 +16,7 @@
   {% for c in clips %}
     <div class="rp-card" data-id="{{ c.id }}" data-start="{{ c.start }}" data-end="{{ c.end }}"{% if c.busy %} data-busy="1"{% endif %}{% if c.fixes %} data-fixes="1"{% endif %}>
       <div class="rp-video">
-        <video controls playsinline preload="none" poster="/media/posters/{{ c.id }}.jpg" src="/media/clips/{{ c.id }}.mp4?v={{ c.version }}"></video>
+        <video controls playsinline preload="none" poster="/media/posters/{{ c.id }}.jpg?v={{ c.version }}" src="/media/clips/{{ c.id }}.mp4?v={{ c.version }}"></video>
         <span class="rp-score">🔥 {{ c.score }}</span>
         {% if done %}<button type="button" class="rp-del" title="Delete clip" aria-label="Delete clip">🗑</button>{% endif %}
         <div class="rp-busy"{% if not c.busy %} hidden{% endif %}>Re-rendering…</div>

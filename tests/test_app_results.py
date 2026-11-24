@@ -1,10 +1,15 @@
+import asyncio
 import json
+import os
 import time
 import zipfile
 
 import pytest
 
+from pathlib import Path
+
 from clipper import db
+from clipper.app import stream_and_delete, sweep_stale_zips
 from clipper.models import Transcript, Word
 from clipper.worker import job_dir
 from tests.test_app_home import authed, client, conn, ctx  # noqa: F401  (fixtures)
@@ -229,3 +234,46 @@ def test_api_jobs_lists_rerendering_clip_ids(authed, conn, clip_on_disk):
     assert d["rerendering"] == [clip_on_disk] and all(x["id"] != j for x in d["active"] + d["finished"])
     db.update_job(conn, j, status="done")
     assert authed.get("/api/jobs").json()["rerendering"] == []
+
+
+def test_zip_stream_removes_file_when_closed_early(tmp_path):
+    f = tmp_path / "a.zip.tmp"
+    f.write_bytes(b"z" * (3 * 1024 * 1024))
+
+    async def run():
+        gen = stream_and_delete(f)
+        assert len(await gen.__anext__()) > 0  # client read one chunk, then disconnected
+        await gen.aclose()
+
+    asyncio.run(run())
+    assert not f.exists()
+
+
+def test_stale_zip_tmp_is_swept_before_building(authed, ctx, conn):
+    s = ctx[0]
+    jid = make_job(conn, s)
+    make_clip(conn, s, jid, title="Top")
+    d = job_dir(s, jid)
+    old, fresh = d / "old.zip.tmp", d / "fresh.zip.tmp"
+    old.write_bytes(b"o")
+    fresh.write_bytes(b"f")
+    os.utime(old, (time.time() - 7200, time.time() - 7200))
+    assert authed.get(f"/jobs/{jid}/zip").status_code == 200
+    assert not old.exists() and fresh.exists()  # a recent tmp may be another download in progress
+    sweep_stale_zips(d, time.time() + 7200)
+    assert not fresh.exists()
+
+
+def test_delete_survives_locked_files(authed, conn, clip_on_disk, monkeypatch):
+    def locked(self, missing_ok=False):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    r = authed.post(f"/clips/{clip_on_disk}/delete")
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert db.get_clip(conn, clip_on_disk) is None
+
+
+def test_poster_url_is_versioned(authed, conn, clip_on_disk):
+    jid = db.get_clip(conn, clip_on_disk)["job_id"]
+    assert f"/media/posters/{clip_on_disk}.jpg?v=1" in authed.get(f"/jobs/{jid}").text
