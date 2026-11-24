@@ -1,0 +1,6 @@
+.venv/
+data/
+config.toml
+.superpowers/
+__pycache__/
+*.tmp*
