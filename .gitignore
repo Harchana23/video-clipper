@@ -4,3 +4,6 @@ config.toml
 .superpowers/
 __pycache__/
 *.tmp*
+*.egg-info/
+.pytest_cache/
+clipper/assets/

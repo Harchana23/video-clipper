@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · Clipper{% endblock %}
+{% block body %}
+<div class="top"><a class="ghost" href="/">← Back</a>
+  <form method="post" action="/logout"><button class="ghost" type="submit">Sign out</button></form></div>
+
+<div id="results" data-duration="{{ duration }}" data-styles='{{ styles | tojson }}'>
+  <div class="rp-head">
+    <div><b>{{ title }}</b><span>{{ clips|length }} clip{{ "" if clips|length == 1 else "s" }} · finished {{ when }}</span></div>
+    {% if clips %}<a class="rp-all" href="/jobs/{{ job["id"] }}/zip">⬇ Download all ({{ clips|length }}) · .zip</a>{% endif %}
+  </div>
+  {% if not done %}<div class="rp-note">Still processing. Clips can't be changed until it finishes.</div>{% endif %}
+  {% if not clips %}<div class="small left">No finished clips.</div>{% endif %}
+
+  <div class="rp-grid">
+  {% for c in clips %}
+    <div class="rp-card" data-id="{{ c.id }}" data-start="{{ c.start }}" data-end="{{ c.end }}"{% if c.busy %} data-busy="1"{% endif %}{% if c.fixes %} data-fixes="1"{% endif %}>
+      <div class="rp-video">
+        <video controls playsinline preload="none" poster="/media/posters/{{ c.id }}.jpg?v={{ c.version }}" src="/media/clips/{{ c.id }}.mp4?v={{ c.version }}"></video>
+        <span class="rp-score">🔥 {{ c.score }}</span>
+        {% if done %}<button type="button" class="rp-del" title="Delete clip" aria-label="Delete clip">🗑</button>{% endif %}
+        <div class="rp-busy"{% if not c.busy %} hidden{% endif %}>Re-rendering…</div>
+      </div>
+      <div class="rp-meta"><b>{{ c.title }}</b><span>{{ c.length }} · from {{ c.at }}</span></div>
+      <div class="rp-btns">
+        <a class="pri" href="/clips/{{ c.id }}/download">⬇ Download</a>
+        <button type="button" class="edit"{% if cleaned or not done %} disabled{% endif %}>✂ Edit</button>
+        <button type="button" class="cap"{% if cleaned or not done %} disabled{% endif %}>Aa Caption</button>
+      </div>
+      {% if cleaned %}<div class="rp-note">Source cleaned up — download only</div>{% endif %}
+      {% if c.failed %}<div class="rp-note">The last change didn't work: {{ c.failed }}</div>{% endif %}
+      <div class="rp-panel" hidden></div>
+    </div>
+  {% endfor %}
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/app.js"></script>{% endblock %}
