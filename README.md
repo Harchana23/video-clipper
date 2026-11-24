@@ -43,6 +43,16 @@ Laptop notes:
 - Set "when I close the lid" to **Do nothing** (Control Panel > Power Options), so it keeps working with the lid shut.
 - Keep the vents clear and the laptop on a hard surface; long jobs run the GPU hot.
 
+## If downloads start failing
+
+Video sites change often, and the downloader (yt-dlp) needs updates to keep up. Stop Clipper, then run this in the Clipper folder:
+
+```
+.venv\Scripts\python -m pip install -U yt-dlp
+```
+
+Start Clipper again and press Retry on the failed job.
+
 ## A note on movie clips
 
 Posting clips from movies or other people's streams publicly can get them taken down or the account struck. Your own content is safe; for the rest, keep it private or check the rules of where you post.

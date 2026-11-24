@@ -50,6 +50,7 @@ $Py = Join-Path $Repo '.venv\Scripts\python.exe'
 if (-not (Test-Path $Py)) { Run-Native py -3.12 -m venv (Join-Path $Repo '.venv') }
 Run-Native $Py -m pip install --upgrade pip
 Run-Native $Py -m pip install -e .
+Run-Native $Py -m pip install -U yt-dlp  # sites change often; the newest yt-dlp keeps downloads working
 
 Step 'GPU check (faster-whisper)'
 Run-Native $Py -c "import ctranslate2, sys; n = ctranslate2.get_cuda_device_count(); print('CUDA devices:', n); sys.exit(0 if n >= 1 else 1)"
