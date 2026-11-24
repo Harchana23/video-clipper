@@ -118,9 +118,11 @@ class Worker(threading.Thread):
         jid = job["id"]
         try:
             if job["kind"] == "rerender":
-                self._rerender(job)
+                self._rerender(job)  # its final cancel check sits just before the clip row changes
             else:
                 self._video(job)
+                if self._cancel_requested(jid):  # final, uncached check: a late cancel still wins
+                    raise Canceled()
             db.update_job(self.conn, jid, status="done", finished_at=time.time())
         except Canceled:
             db.update_job(self.conn, jid, status="canceled", finished_at=time.time())
@@ -142,6 +144,9 @@ class Worker(threading.Thread):
         except OSError:
             pass
 
+    def _cancel_requested(self, job_id: int) -> bool:
+        return bool(db.get_job(self.conn, job_id)["cancel_requested"])
+
     def _should_stop(self, job_id: int) -> Callable[[], bool]:
         last, value = float("-inf"), False
 
@@ -150,7 +155,7 @@ class Worker(threading.Thread):
             now = time.monotonic()
             if now - last >= 0.5:
                 last = now
-                value = bool(db.get_job(self.conn, job_id)["cancel_requested"])
+                value = self._cancel_requested(job_id)
             return value
         return should_stop
 
@@ -222,6 +227,8 @@ class Worker(threading.Thread):
                 self._render(source, media, d, clip["id"], out, m.start, m.end, job["video_type"],
                              transcript.words if clip["captions_on"] else None, clip["caption_style"],
                              _corrections(clip["corrections"]))
+            # also heals a row left at file=NULL by a crash between render's final rename and this update
+            if (clip["file"], clip["poster"]) != (str(out), str(out.with_suffix(".jpg"))):
                 db.update_clip(conn, clip["id"], file=str(out), poster=str(out.with_suffix(".jpg")))
             db.update_job(conn, jid, step_progress=(i + 1) / len(moments))
             self._drain_rerenders()
@@ -265,6 +272,10 @@ class Worker(threading.Thread):
         out = _clip_path(d, clip["id"], version)
         self._render(source, self.steps.probe(source), d, clip["id"], out, start, end, vjob["video_type"],
                      words, style, corrections)
+        if self._cancel_requested(job["id"]):  # canceled while rendering: drop the new files, keep the clip as it was
+            for f in (out, out.with_suffix(".jpg"), out.with_suffix(".ass")):
+                f.unlink(missing_ok=True)
+            raise Canceled()
 
         db.update_clip(self.conn, clip["id"], start=start, end=end, captions_on=int(captions_on),
                        caption_style=style, corrections=json.dumps({str(k): v for k, v in corrections.items()}),

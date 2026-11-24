@@ -183,7 +183,30 @@ def test_worker_resumes_after_restart(settings, tmp_path, conn):
     assert "download" not in names(fake) and "transcribe" not in names(fake)
     renders = [c for c in fake.calls if c[0] == "render"]
     assert len(renders) == 1 and renders[0][2:4] == (50.0, 80.0)
-    assert len(db.list_clips(conn, jid)) == 2
+    clips = db.list_clips(conn, jid)
+    assert len(clips) == 2
+    for c in clips:  # including the one rendered before the crash, whose row still had file=NULL
+        assert c["file"] and Path(c["file"]).exists() and c["file"].endswith(f"{c['id']}_v1.mp4")
+        assert c["poster"] == str(Path(c["file"]).with_suffix(".jpg"))
+
+
+def test_resume_rerenders_clip_with_only_partial_file(settings, tmp_path, conn):
+    jid = video_job(conn, status="running", step=4)
+    d = job_dir(settings, jid)
+    (d / "clips").mkdir(parents=True)
+    (d / "source.mp4").write_bytes(b"v")
+    Transcript("en", [], []).save(d / "transcript.json")
+    cid = db.add_clip(conn, job_id=jid, start=10.0, end=40.0, title="First", score=90, captions_on=0,
+                      caption_style="bold_white")
+    (d / "clips" / f"{cid}_v1.tmp.mp4").write_bytes(b"half")  # crash mid-encode
+    fake = FakeSteps(MOMENTS[:1])
+    db.requeue_running(conn)
+    assert make_worker(settings, tmp_path, fake).run_once()
+    (render,) = [c for c in fake.calls if c[0] == "render"]
+    assert render[1] == f"{cid}_v1.mp4"
+    clip = db.get_clip(conn, cid)
+    assert clip["file"] == str(d / "clips" / f"{cid}_v1.mp4") and Path(clip["file"]).exists()
+    assert len(db.list_clips(conn, jid)) == 1
 
 
 def test_worker_cancel_marks_canceled(settings, tmp_path, conn):
@@ -211,6 +234,35 @@ def test_cancel_before_start_skips_all_steps(settings, tmp_path, conn):
     jid = video_job(conn, cancel_requested=1)
     assert make_worker(settings, tmp_path, fake).run_once()
     assert db.get_job(conn, jid)["status"] == "canceled" and fake.calls == []
+
+
+def cancel_during_render(fake, conn, job_id):
+    real = fake.render_clip
+
+    def render_then_cancel(*a, **kw):
+        real(*a, **kw)
+        db.update_job(conn, job_id, cancel_requested=1)
+    fake.render_clip = render_then_cancel
+
+
+def test_late_cancel_wins_over_done_for_video_job(settings, tmp_path, conn):
+    fake = FakeSteps(MOMENTS[:1])
+    jid = video_job(conn)
+    cancel_during_render(fake, conn, jid)  # after the last clip, no checkpoint is left but the final one
+    assert make_worker(settings, tmp_path, fake).run_once()
+    assert db.get_job(conn, jid)["status"] == "canceled"
+
+
+def test_late_cancel_of_rerender_keeps_clip_untouched(settings, tmp_path, conn):
+    _, cid, old = done_job_with_clip(conn, settings)
+    before = dict(db.get_clip(conn, cid))
+    rid = db.create_job(conn, kind="rerender", status="queued", clip_id=cid, params=json.dumps({"start": 12.0}))
+    fake = FakeSteps()
+    cancel_during_render(fake, conn, rid)
+    assert make_worker(settings, tmp_path, fake).run_once()
+    assert db.get_job(conn, rid)["status"] == "canceled"
+    assert dict(db.get_clip(conn, cid)) == before and old.exists()
+    assert not old.with_name(f"{cid}_v2.mp4").exists() and not old.with_name(f"{cid}_v2.jpg").exists()
 
 
 def test_stop_requeues_job_after_current_step(settings, tmp_path, conn):
