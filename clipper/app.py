@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import get_args
 from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -75,14 +75,17 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Jinja2Templates(directory=HERE / "templates")
 
-    def require_session(request: Request) -> None:
+    @app.middleware("http")
+    async def require_session(request: Request, call_next):
+        # runs before routing and body parsing, so anonymous uploads are never read or spooled to disk
+        path = request.url.path
+        if path in ("/login", "/logout") or path.startswith("/static/"):
+            return await call_next(request)
         if check_session(request.cookies.get("session"), settings.session_secret, settings.password_hash):
-            return
-        if request.url.path.startswith(("/api/", "/media/")):
-            raise HTTPException(401, "Sign in required")
-        raise HTTPException(303, headers={"Location": "/login"})
-
-    auth = [Depends(require_session)]
+            return await call_next(request)
+        if request.method == "GET" and not path.startswith(("/api/", "/media/")):
+            return RedirectResponse("/login", 303)
+        return PlainTextResponse("Sign in required", 401)
 
     def home_page(request: Request, error: str | None = None, status: int = 200):
         ctx = {"error": error, "video_types": VIDEO_TYPES, "lengths": LENGTHS, "styles": STYLES,
@@ -139,11 +142,11 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
 
     # --- pages and jobs ------------------------------------------------------------
 
-    @app.get("/", dependencies=auth)
+    @app.get("/")
     def home(request: Request):
         return home_page(request)
 
-    @app.post("/jobs", dependencies=auth)
+    @app.post("/jobs")
     def create_job(url: str = Form(""), video_type: str = Form(""), length_preset: str = Form(""),
                    captions_on: str = Form(""), caption_style: str = Form("")):
         url = url.strip()
@@ -154,7 +157,7 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
         db.create_job(conn, source_url=url, **opts)
         return RedirectResponse("/", 303)
 
-    @app.post("/jobs/upload", dependencies=auth)
+    @app.post("/jobs/upload")
     def upload_job(file: UploadFile | None = File(None), video_type: str = Form(""), length_preset: str = Form(""),
                    captions_on: str = Form(""), caption_style: str = Form("")):
         opts = options(video_type, length_preset, captions_on, caption_style)
@@ -176,7 +179,7 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
         db.create_job(conn, upload_path=str(final), title=title, **opts)
         return RedirectResponse("/", 303)
 
-    @app.get("/api/jobs", dependencies=auth)
+    @app.get("/api/jobs")
     def api_jobs():
         now = time.time()
         active, finished = db.list_jobs(conn)
@@ -186,7 +189,7 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
                     for j in jobs if j["kind"] != "rerender"]
         return {"active": rows(active), "finished": rows(finished)}
 
-    @app.post("/jobs/{job_id}/cancel", dependencies=auth)
+    @app.post("/jobs/{job_id}/cancel")
     def cancel(job_id: int):
         job = db.get_job(conn, job_id)
         if job is None:
@@ -195,7 +198,7 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
             db.update_job(conn, job_id, cancel_requested=1)  # the worker notices at its next checkpoint
         return {"ok": True}
 
-    @app.post("/jobs/{job_id}/retry", dependencies=auth)
+    @app.post("/jobs/{job_id}/retry")
     def retry(job_id: int):
         job = db.get_job(conn, job_id)
         if job is None:
@@ -206,7 +209,7 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
                       step=0, step_progress=0.0)
         return {"ok": True}
 
-    @app.get("/media/thumbs/{job_id}.jpg", dependencies=auth)
+    @app.get("/media/thumbs/{job_id}.jpg")
     def thumb(job_id: int):
         path = job_dir(settings, job_id) / "source.jpg"
         if not path.is_file():

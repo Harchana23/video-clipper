@@ -202,3 +202,16 @@ def test_server_binds_localhost_only(ctx):
     kw = uvicorn_kwargs(ctx[0], port=None)
     assert kw["host"] == "127.0.0.1" and kw["port"] == ctx[0].port
     assert uvicorn_kwargs(ctx[0], port=9000)["port"] == 9000
+
+
+def test_unauthenticated_upload_is_rejected_before_body_is_read(client, ctx, monkeypatch):
+    from starlette.requests import Request
+
+    async def never(self, *a, **k):
+        raise AssertionError("request body was parsed for an anonymous client")
+    monkeypatch.setattr(Request, "form", never)
+    r = client.post("/jobs/upload", data={"video_type": "talk", "length_preset": "auto"},
+                    files={"file": ("a.mp4", b"x" * 1000, "video/mp4")})
+    assert r.status_code == 401
+    assert client.post("/jobs", data=OK).status_code == 401
+    assert list((ctx[0].data_dir / "uploads").iterdir()) == []
