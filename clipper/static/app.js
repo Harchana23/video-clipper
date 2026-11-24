@@ -214,7 +214,9 @@
     });
     const row = el("div", "rp-btns");
     row.append(btn("", "Cancel", () => closePanel(card)), save);
-    p.append(track, read, err, row);
+    p.append(track, read);
+    if (card.dataset.fixes) p.append(el("p", "sub", "Trimming clears your caption fixes."));
+    p.append(err, row);
     p.hidden = false;
   }
 

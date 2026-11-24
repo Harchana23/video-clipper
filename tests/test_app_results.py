@@ -149,10 +149,33 @@ def test_trim_validates_and_queues_rerender(authed, conn, clip_on_disk):
     assert r.status_code == 200 and r.json()["ok"] is True
     job = db.get_job(conn, r.json()["job_id"])
     assert (job["kind"], job["status"], job["priority"], job["clip_id"]) == ("rerender", "queued", 10, c)
-    assert json.loads(job["params"]) == {"start": 1.0, "end": 4.0}
+    assert json.loads(job["params"]) == {"start": 1.0, "end": 4.0, "corrections": {}}  # changed range clears positional fixes
     assert dict(db.get_clip(conn, c)) == before  # the route never touches the clip row
     r2 = authed.post(f"/clips/{c}/trim", json={"start": 1, "end": 5})
     assert r2.status_code == 409 and "already being re-rendered" in r2.text
+
+
+def test_trim_to_same_range_keeps_corrections(authed, conn, clip_on_disk):
+    r = authed.post(f"/clips/{clip_on_disk}/trim", json={"start": 10, "end": 40})
+    assert json.loads(db.get_job(conn, r.json()["job_id"])["params"]) == {"start": 10.0, "end": 40.0}
+
+
+def test_delete_blocked_while_rerendering(authed, conn, clip_on_disk):
+    j = db.create_job(conn, kind="rerender", status="queued", clip_id=clip_on_disk, priority=10)
+    r = authed.post(f"/clips/{clip_on_disk}/delete")
+    assert r.status_code == 409 and "This clip is being re-rendered." in r.text
+    assert db.get_clip(conn, clip_on_disk) is not None
+    db.update_job(conn, j, status="running")
+    assert authed.post(f"/clips/{clip_on_disk}/delete").status_code == 409
+    db.update_job(conn, j, status="done")
+    assert authed.post(f"/clips/{clip_on_disk}/delete").status_code == 200
+
+
+def test_results_card_flags_stored_fixes(authed, conn, clip_on_disk):
+    jid = db.get_clip(conn, clip_on_disk)["job_id"]
+    assert "data-fixes" not in authed.get(f"/jobs/{jid}").text
+    db.update_clip(conn, clip_on_disk, corrections=json.dumps({"0": "x"}))
+    assert 'data-fixes="1"' in authed.get(f"/jobs/{jid}").text
 
 
 def test_edit_blocked_when_processing_or_cleaned(authed, conn, clip_on_disk):

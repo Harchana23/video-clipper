@@ -14,7 +14,7 @@
 
   <div class="rp-grid">
   {% for c in clips %}
-    <div class="rp-card" data-id="{{ c.id }}" data-start="{{ c.start }}" data-end="{{ c.end }}"{% if c.busy %} data-busy="1"{% endif %}>
+    <div class="rp-card" data-id="{{ c.id }}" data-start="{{ c.start }}" data-end="{{ c.end }}"{% if c.busy %} data-busy="1"{% endif %}{% if c.fixes %} data-fixes="1"{% endif %}>
       <div class="rp-video">
         <video controls playsinline preload="none" poster="/media/posters/{{ c.id }}.jpg" src="/media/clips/{{ c.id }}.mp4?v={{ c.version }}"></video>
         <span class="rp-score">🔥 {{ c.score }}</span>

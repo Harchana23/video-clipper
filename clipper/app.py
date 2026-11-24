@@ -46,6 +46,7 @@ MAX_WORD = 40  # characters in one caption word
 PROCESSING = "This video is still processing."
 CLEANED_UP = "The source video was cleaned up, so this clip can't be changed."
 BUSY = "This clip is already being re-rendered."
+DELETE_BUSY = "This clip is being re-rendered."
 
 
 def _mmss(t: float) -> str:
@@ -306,7 +307,7 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
         busy = {j["clip_id"] for j in db.list_jobs(conn)[0] if j["kind"] == "rerender"}
         clips = [{"id": c["id"], "title": c["title"], "score": c["score"], "version": c["version"],
                   "length": _mmss(c["end"] - c["start"]), "at": _mmss(c["start"]), "start": c["start"],
-                  "end": c["end"], "busy": c["id"] in busy} for c in rendered_clips(job_id)]
+                  "end": c["end"], "busy": c["id"] in busy, "fixes": json.loads(c["corrections"] or "{}") != {}} for c in rendered_clips(job_id)]
         ctx = {"job": job, "title": job["title"] or job["source_url"] or "Untitled", "clips": clips,
                "styles": STYLES, "duration": job["duration"] or 0, "done": job["status"] == "done",
                "cleaned": bool(job["source_deleted"]), "when": time.strftime(
@@ -354,6 +355,8 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
     @app.post("/clips/{clip_id}/delete")
     def clip_delete(clip_id: int):
         _, job = editable_clip(clip_id, for_edit=False)
+        if rerender_active(clip_id):
+            raise HTTPException(409, DELETE_BUSY)
         db.delete_clip(conn, clip_id)
         for f in (job_dir(settings, job["id"]) / "clips").glob(f"{clip_id}_*"):  # "5_" never matches clip 55's files
             f.unlink(missing_ok=True)
@@ -379,7 +382,10 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
             raise HTTPException(400, "Pick a start and end inside the video.")
         if end - start < MIN_CLIP:
             raise HTTPException(400, f"A clip must be at least {MIN_CLIP:.0f} seconds long.")
-        return queue_rerender(clip, {"start": start, "end": end})
+        params = {"start": start, "end": end}
+        if (start, end) != (clip["start"], clip["end"]):
+            params["corrections"] = {}  # stored fixes are positional within the old word range
+        return queue_rerender(clip, params)
 
     @app.post("/clips/{clip_id}/captions")
     async def clip_captions(request: Request, clip_id: int):
