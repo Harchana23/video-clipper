@@ -7,9 +7,9 @@ from dataclasses import replace
 from pathlib import Path
 
 from clipper.config import load_settings
-from clipper.ingest import accept_upload, download, probe, safe_filename
+from clipper.ingest import IngestError, accept_upload, download, probe, safe_filename
 from clipper.models import LENGTH_RANGES, SourceInfo
-from clipper.moments_llm import find_moments
+from clipper.moments_llm import MomentsError, find_moments
 from clipper.transcribe import transcribe
 
 
@@ -47,8 +47,8 @@ def find_moments_cmd(args: argparse.Namespace) -> int:
         src = Path(args.source)
         job_dir = root / safe_filename(src.stem)
         job_dir.mkdir(parents=True, exist_ok=True)
-        existing = next(job_dir.glob("source.*"), None)
-        if existing is not None and existing.suffix != ".tmp":  # already ingested: resume
+        existing = next((f for f in job_dir.glob("source.*") if f.suffix != ".tmp"), None)
+        if existing is not None:  # already ingested: resume
             info = SourceInfo(existing, src.stem, probe(existing).duration, None)
         else:
             tmp = job_dir / f"incoming{src.suffix}"  # accept_upload moves its input; keep the original
@@ -76,7 +76,11 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--config", default="config.toml")
     f.set_defaults(func=find_moments_cmd)
     args = p.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (MomentsError, IngestError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

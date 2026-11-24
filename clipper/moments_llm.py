@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import os
+import shutil
 import subprocess
 from dataclasses import asdict
 from pathlib import Path
@@ -34,13 +36,30 @@ _LOOK_FOR = {
 }
 
 
+class MomentsError(Exception):
+    """A problem the user can fix (e.g. Ollama not running); the message is meant to be shown as is."""
+
+
 def _client() -> httpx.Client:  # tests monkeypatch this to inject a MockTransport
-    return httpx.Client(timeout=300)
+    return httpx.Client(timeout=httpx.Timeout(300, connect=5))
+
+
+def _generate(c: httpx.Client, settings: Settings, body: dict) -> httpx.Response:
+    try:
+        r = c.post(f"{settings.ollama_host}/api/generate", json=body)
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        raise MomentsError(f"Ollama is not reachable at {settings.ollama_host}. Start Ollama and try again.")
+    if r.status_code == 404:
+        raise MomentsError(f"Model {settings.ollama_model} isn't installed. Run: ollama pull {settings.ollama_model}")
+    r.raise_for_status()
+    return r
 
 
 # ---------- audio energy ----------
 
 def energy_profile(source: Path, hop: float = HOP) -> np.ndarray:
+    if not probe(source).has_audio:
+        return np.zeros(0, dtype=np.float32)
     rate = 16000
     n = int(rate * hop)
     cmd = ["ffmpeg", "-loglevel", "error", "-i", str(source), "-vn", "-ac", "1", "-ar", str(rate),
@@ -137,12 +156,11 @@ def ollama_candidates(text: str, chunk_start: float, chunk_end: float, video_typ
         "model": settings.ollama_model,
         "prompt": _prompt(text, chunk_start, chunk_end, video_type, lo, hi),
         "format": "json", "think": False, "stream": False,
-        "options": {"temperature": 0.3}, "keep_alive": "5m",
+        "options": {"temperature": 0.3, "num_ctx": 8192}, "keep_alive": "5m",
     }
     with _client() as c:
         for attempt in range(2):
-            r = c.post(f"{settings.ollama_host}/api/generate", json=body)
-            r.raise_for_status()
+            r = _generate(c, settings, body)
             try:
                 return _parse(r.json()["response"], chunk_start, chunk_end)
             except (ValueError, KeyError, TypeError) as e:  # JSONDecodeError is a ValueError
@@ -152,8 +170,7 @@ def ollama_candidates(text: str, chunk_start: float, chunk_end: float, video_typ
 
 def unload_model(settings: Settings) -> None:
     with _client() as c:
-        c.post(f"{settings.ollama_host}/api/generate",
-               json={"model": settings.ollama_model, "keep_alive": 0}).raise_for_status()
+        _generate(c, settings, {"model": settings.ollama_model, "keep_alive": 0})
 
 
 # ---------- pipeline ----------
@@ -164,15 +181,30 @@ def _atomic_write(path: Path, data) -> None:
     os.replace(tmp, path)
 
 
+def cache_key(video_type: VideoType, preset: LengthPreset, settings: Settings) -> dict:
+    lo, hi = LENGTH_RANGES[preset]
+    template = _prompt("{text}", 0, 0, video_type, lo, hi)
+    return {"video_type": video_type, "preset": preset, "ollama_model": settings.ollama_model,
+            "prompt_sha256": hashlib.sha256(template.encode()).hexdigest()}
+
+
 def find_moments(source: Path, transcript: Transcript, video_type: VideoType, preset: LengthPreset,
                  settings: Settings, job_dir: Path, progress: Progress,
                  should_stop: ShouldStop) -> list[Moment]:
     final = job_dir / "moments.json"
+    lo, hi = LENGTH_RANGES[preset]
+    chunk_dir = job_dir / "moment_chunks"
+    key = cache_key(video_type, preset, settings)
+    key_file = job_dir / "moments_key.json"
+    stored = json.loads(key_file.read_text(encoding="utf-8")) if key_file.exists() else None
+    if stored != key:  # results from another type/length/model/prompt must not be reused
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+        final.unlink(missing_ok=True)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(key_file, key)
     if final.exists():
         return [Moment(**m) for m in json.loads(final.read_text(encoding="utf-8"))]
-    lo, hi = LENGTH_RANGES[preset]
     duration = probe(source).duration
-    chunk_dir = job_dir / "moment_chunks"
     chunk_dir.mkdir(parents=True, exist_ok=True)
     words = transcript.words
     step = CHUNK - OVERLAP

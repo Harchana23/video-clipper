@@ -35,7 +35,7 @@ def test_ollama_candidates_parses_and_clamps(settings, monkeypatch):
     assert out == [Candidate(100, 600, "T" * 80, 80, "r")]
     b = seen[0]
     assert b["model"] == "qwen3:4b" and b["format"] == "json" and b["think"] is False
-    assert b["stream"] is False and b["keep_alive"] == "5m" and b["options"] == {"temperature": 0.3}
+    assert b["stream"] is False and b["keep_alive"] == "5m" and b["options"] == {"temperature": 0.3, "num_ctx": 8192}
     assert "30" in b["prompt"] and "90" in b["prompt"]
 
 
@@ -61,6 +61,37 @@ def test_ollama_candidates_accepts_bare_list(settings, monkeypatch):
 def test_ollama_candidates_gives_up_after_second_bad_json(settings, monkeypatch):
     _mock(monkeypatch, lambda r: _reply("nope"))
     assert ml.ollama_candidates("x", 0, 600, "talk", 30, 90, settings) == []
+
+
+def test_ollama_not_reachable_is_clear(settings, monkeypatch):
+    def handler(req):
+        raise httpx.ConnectError("refused")
+
+    _mock(monkeypatch, handler)
+    with pytest.raises(ml.MomentsError, match="Ollama is not reachable at http://127.0.0.1:11434"):
+        ml.ollama_candidates("x", 0, 600, "talk", 30, 90, settings)
+
+
+def test_missing_model_is_clear(settings, monkeypatch):
+    _mock(monkeypatch, lambda r: httpx.Response(404, json={"error": "model not found"}))
+    with pytest.raises(ml.MomentsError, match="ollama pull qwen3:4b"):
+        ml.ollama_candidates("x", 0, 600, "talk", 30, 90, settings)
+
+
+def test_energy_profile_no_audio_is_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(ml, "probe", lambda p: type("I", (), {"has_audio": False})())
+    assert len(ml.energy_profile(tmp_path / "x.mp4")) == 0
+
+
+def test_cli_reports_moments_error_cleanly(monkeypatch, capsys):
+    from clipper import cli
+
+    def boom(args):
+        raise ml.MomentsError("Ollama is not reachable at h. Start Ollama and try again.")
+
+    monkeypatch.setattr(cli, "find_moments_cmd", boom)
+    assert cli.main(["find-moments", "x.mp4"]) == 1
+    assert "Ollama is not reachable" in capsys.readouterr().err
 
 
 def test_unload_model_posts_keep_alive_zero(settings, monkeypatch):
@@ -129,6 +160,7 @@ def test_find_moments_resumes_from_chunk_files(settings, tmp_path, monkeypatch):
     _fake(monkeypatch, 100)
     monkeypatch.setattr(ml, "unload_model", lambda s: None)
     (tmp_path / "moment_chunks").mkdir()
+    (tmp_path / "moments_key.json").write_text(json.dumps(ml.cache_key("talk", "auto", settings)))
     (tmp_path / "moment_chunks" / "0000.json").write_text(
         json.dumps([{"start": 0, "end": 40, "title": "saved", "ai_score": 90, "reason": "r"}]))
 
@@ -145,20 +177,29 @@ def test_find_moments_resumes_from_chunk_files(settings, tmp_path, monkeypatch):
     assert _run(settings, tmp_path, t) == out
 
 
+def test_find_moments_recomputes_when_type_changes(settings, tmp_path, monkeypatch):
+    _fake(monkeypatch, 100)
+    monkeypatch.setattr(ml, "unload_model", lambda s: None)
+    calls = []
+    monkeypatch.setattr(ml, "ollama_candidates",
+                        lambda text, cs, ce, vt, lo, hi, s: calls.append(vt) or [])
+    t = Transcript("en", _words(300), [])
+    _run(settings, tmp_path, t, vt="talk")
+    _run(settings, tmp_path, t, vt="talk")
+    assert calls == ["talk"]  # same key: reused
+    _run(settings, tmp_path, t, vt="gaming")
+    assert calls == ["talk", "gaming"]
+
+
 def test_find_moments_chunks_and_audio_fallback(settings, tmp_path, monkeypatch):
-    # 1300 s source -> chunks at 0, 540, 1080; no words at all -> audio candidates added
+    # 1300 s source -> chunks at 0, 540, 1080; empty transcript -> audio candidates only
     energy = np.zeros(2600)
-    energy[400] = 1.0
+    energy[380:420] = 1.0  # loud stretch around 200 s
     _fake(monkeypatch, 1300, energy)
     monkeypatch.setattr(ml, "unload_model", lambda s: None)
-    spans = []
-    monkeypatch.setattr(ml, "ollama_candidates",
-                        lambda text, cs, ce, vt, lo, hi, s: spans.append((cs, ce)) or [])
-    sparse = Transcript("en", [Word(10, 10.5, "hi."), Word(600, 600.5, "yo."), Word(1100, 1100.5, "ok.")], [])
-    out = _run(settings, tmp_path, sparse, vt="gaming")
-    assert spans == [(0, 600), (540, 1140), (1080, 1300)]
+    out = _run(settings, tmp_path, Transcript("en", [], []), vt="gaming")
     assert sorted(p.name for p in (tmp_path / "moment_chunks").iterdir()) == ["0000.json", "0001.json", "0002.json"]
-    assert out and all(isinstance(m, Moment) for m in out)
+    assert any(m.start <= 200 <= m.end for m in out)
 
 
 def test_energy_score_peak_window_scores_higher():
