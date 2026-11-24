@@ -156,3 +156,40 @@ def test_audio_candidates_non_overlapping_and_clamped():
         assert 0 <= c.start and c.end <= 600 and c.end - c.start == 60
     assert cs[0].start == 0  # clamped at the start, length preserved
     assert cs[1].start < 400 < cs[1].end
+
+
+def plain(n, ends_at=()):
+    """1 s words; `.` after the word indexes in ends_at."""
+    return [Word(i, i + 1, f"w{i}." if i in ends_at else f"w{i}") for i in range(n)]
+
+
+def test_sentence_ends_quotes_brackets_ellipsis():
+    ws = [Word(0, 1, 'said."'), Word(1, 2, "x"), Word(2, 3, "(ok.)"), Word(3, 4, "y?\u201d"), Word(4, 5, "z\u2026")]
+    assert sentence_ends(ws) == [0, 2, 3, 4]
+
+
+def test_snap_unpunctuated_mid_transcript_stays_local():
+    ws = plain(1000)
+    out = snap(cand(500, 520), ws, 30, 90)
+    assert out.start == 500 and 30 <= out.end - out.start <= 90
+
+
+def test_snap_start_bound():
+    far = snap(cand(20.5, 30), plain(40, ends_at={4}), 5, 60)  # sentence starts at 5: 15.5 s back
+    assert far.start == 21
+    near = snap(cand(20.5, 30), plain(40, ends_at={14}), 5, 60)  # sentence starts at 15: 5.5 s back
+    assert near.start == 15
+
+
+def test_snap_end_bound():
+    far = snap(cand(5, 20.5), plain(40), 5, 60)  # next sentence end is 40: 19.5 s ahead
+    assert far.end == 20
+    near = snap(cand(5, 20.5), plain(40, ends_at={24}), 5, 60)  # sentence end at 25: 4.5 s ahead
+    assert near.end == 25
+
+
+def test_snap_past_last_word():
+    ws = sentence_words(100)
+    assert snap(cand(150, 200), ws, 30, 90) is None
+    assert snap(cand(95, 130), ws, 30, 90) is None  # only 5 s of source left
+    assert snap(cand(95, 130), ws, 3, 90) == cand(95, 100)  # clamped to the last word's end

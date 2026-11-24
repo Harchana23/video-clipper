@@ -16,24 +16,47 @@ _WEIGHTS = {
 }
 
 
+_CLOSERS = "\"'”’)]"
+SNAP_BOUND = 10.0  # max seconds a boundary may move to reach a sentence edge
+
+
 def sentence_ends(words: list[Word]) -> list[int]:
-    return [i for i, w in enumerate(words) if w.text.rstrip().endswith((".", "?", "!"))]
+    return [
+        i for i, w in enumerate(words)
+        if w.text.rstrip().rstrip(_CLOSERS).endswith((".", "?", "!", "…"))
+    ]
 
 
 def snap(c: Candidate, words: list[Word], lo: float, hi: float) -> Candidate | None:
     i0 = next((i for i, w in enumerate(words) if w.end > c.start), None)
     if i0 is None or words[i0].start >= c.end:
         # no transcript here: only the length can be fixed (extend or cut the end)
-        return replace(c, end=c.start + min(max(c.end - c.start, lo), hi))
+        end = c.start + min(max(c.end - c.start, lo), hi)
+        if words:
+            end = min(end, words[-1].end)  # never past the source
+            if end - c.start < lo:
+                return None
+        return replace(c, end=end)
 
     ends = set(sentence_ends(words))
     last = len(words) - 1
     i1 = max(i for i, w in enumerate(words) if w.start < c.end)
 
-    while i0 > 0 and (i0 - 1) not in ends:
-        i0 -= 1
-    while i1 < last and i1 not in ends:
-        i1 += 1
+    j = i0
+    while j > 0 and (j - 1) not in ends:
+        j -= 1
+    if words[j].start >= c.start - SNAP_BOUND:
+        i0 = j
+    else:  # sentence start too far away: nearest word boundary at/after the start
+        i0 = next((i for i in range(i0, i1 + 1) if words[i].start >= c.start), i0)
+
+    k = i1
+    while k < last and k not in ends:
+        k += 1
+    if words[k].end <= c.end + SNAP_BOUND:
+        i1 = k
+    else:  # sentence end too far away: last word ending at/before the candidate end
+        i1 = max((i for i in range(i0, i1 + 1) if words[i].end <= c.end), default=i1)
 
     start = words[i0].start
     while words[i1].end - start < lo and i1 < last:  # extend by whole sentences
