@@ -1,10 +1,13 @@
 """Web app: login, home page, live queue API. Every route except /login and /static needs a session."""
 from __future__ import annotations
 
+import json
 import math
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import get_args
@@ -14,11 +17,14 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.background import BackgroundTask
 
 from clipper import db
 from clipper.auth import SESSION_MAX_AGE, Lockout, check_session, make_session, verify_password
+from clipper.captions import words_in_range
 from clipper.config import Settings
-from clipper.models import LENGTH_RANGES, CaptionStyle, VideoType
+from clipper.ingest import safe_filename
+from clipper.models import LENGTH_RANGES, CaptionStyle, Transcript, VideoType
 from clipper.worker import Worker, job_dir
 
 HERE = Path(__file__).parent
@@ -33,6 +39,28 @@ assert set(LENGTHS) == set(LENGTH_RANGES)
 
 class _BadForm(Exception):
     pass
+
+
+MIN_CLIP = 3.0  # seconds
+MAX_WORD = 40  # characters in one caption word
+PROCESSING = "This video is still processing."
+CLEANED_UP = "The source video was cleaned up, so this clip can't be changed."
+BUSY = "This clip is already being re-rendered."
+
+
+def _mmss(t: float) -> str:
+    t = int(t)
+    return f"{t // 3600}:{t // 60 % 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+
+
+def attachment(name: str) -> dict:
+    return {"Content-Disposition": f'attachment; filename="{name}"'}  # safe_filename output: ASCII, no quotes
+
+
+def _num(v) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise ValueError
+    return float(v)
 
 
 def _eta(job, now: float) -> int | None:
@@ -187,7 +215,8 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
         def rows(jobs):
             return [_job_json(settings, j, sum(1 for c in db.list_clips(conn, j["id"]) if c["file"] is not None), now)
                     for j in jobs if j["kind"] != "rerender"]
-        return {"active": rows(active), "finished": rows(finished)}
+        rerendering = sorted({j["clip_id"] for j in active if j["kind"] == "rerender" and j["clip_id"] is not None})
+        return {"active": rows(active), "finished": rows(finished), "rerendering": rerendering}
 
     @app.post("/jobs/{job_id}/cancel")
     def cancel(job_id: int):
@@ -215,5 +244,158 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
         if not path.is_file():
             raise HTTPException(404)
         return FileResponse(path, media_type="image/jpeg")
+
+    # --- results page: clips, media, edits -----------------------------------------
+
+    def rendered_clips(job_id: int):
+        return [c for c in db.list_clips(conn, job_id) if c["file"] is not None]
+
+    def get_clip_or_404(clip_id: int):
+        clip = db.get_clip(conn, clip_id)
+        if clip is None or clip["file"] is None:  # still rendering or failed: never shown or served
+            raise HTTPException(404)
+        return clip, db.get_job(conn, clip["job_id"])
+
+    def clip_path(clip, job, column: str) -> Path:
+        """File named by the DB row, only if it lies inside the job's folder."""
+        d = job_dir(settings, job["id"]).resolve()
+        raw = clip[column]
+        path = Path(raw).resolve() if raw else None
+        if path is None or not path.is_relative_to(d) or not path.is_file():
+            raise HTTPException(404)
+        return path
+
+    def rerender_active(clip_id: int) -> bool:
+        return any(j["kind"] == "rerender" and j["clip_id"] == clip_id for j in db.list_jobs(conn)[0])
+
+    def editable_clip(clip_id: int, for_edit: bool = True):
+        clip, job = get_clip_or_404(clip_id)
+        if job["status"] != "done":
+            raise HTTPException(409, PROCESSING)
+        if for_edit and job["source_deleted"]:
+            raise HTTPException(409, CLEANED_UP)
+        return clip, job
+
+    async def json_body(request: Request) -> dict:
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Send a JSON object.")
+        return body
+
+    def queue_rerender(clip, params: dict) -> dict:
+        if rerender_active(clip["id"]):  # no await since the check, so check + create can't interleave
+            raise HTTPException(409, BUSY)
+        job_id = db.create_job(conn, kind="rerender", status="queued", priority=10, clip_id=clip["id"],
+                               params=json.dumps(params))
+        return {"ok": True, "job_id": job_id}
+
+    def clip_words(clip, job) -> list:
+        tfile = job_dir(settings, job["id"]) / "transcript.json"
+        if not tfile.is_file():
+            raise HTTPException(404, "No transcript for this video.")
+        return words_in_range(Transcript.load(tfile).words, clip["start"], clip["end"])
+
+    @app.get("/jobs/{job_id}")
+    def results(request: Request, job_id: int):
+        job = db.get_job(conn, job_id)
+        if job is None or job["kind"] == "rerender":
+            raise HTTPException(404)
+        busy = {j["clip_id"] for j in db.list_jobs(conn)[0] if j["kind"] == "rerender"}
+        clips = [{"id": c["id"], "title": c["title"], "score": c["score"], "version": c["version"],
+                  "length": _mmss(c["end"] - c["start"]), "at": _mmss(c["start"]), "start": c["start"],
+                  "end": c["end"], "busy": c["id"] in busy} for c in rendered_clips(job_id)]
+        ctx = {"job": job, "title": job["title"] or job["source_url"] or "Untitled", "clips": clips,
+               "styles": STYLES, "duration": job["duration"] or 0, "done": job["status"] == "done",
+               "cleaned": bool(job["source_deleted"]), "when": time.strftime(
+                   "%b %d", time.localtime(job["finished_at"] or job["created_at"]))}
+        return templates.TemplateResponse(request, "results.html", ctx)
+
+    @app.get("/media/clips/{clip_id}.mp4")
+    def clip_video(clip_id: int):
+        clip, job = get_clip_or_404(clip_id)
+        return FileResponse(clip_path(clip, job, "file"), media_type="video/mp4")  # answers Range with 206
+
+    @app.get("/media/posters/{clip_id}.jpg")
+    def clip_poster(clip_id: int):
+        clip, job = get_clip_or_404(clip_id)
+        return FileResponse(clip_path(clip, job, "poster"), media_type="image/jpeg")
+
+    @app.get("/clips/{clip_id}/download")
+    def clip_download(clip_id: int):
+        clip, job = get_clip_or_404(clip_id)
+        return FileResponse(clip_path(clip, job, "file"), media_type="video/mp4",
+                            headers=attachment(f"{safe_filename(clip['title'] or 'clip')}.mp4"))
+
+    @app.get("/jobs/{job_id}/zip")
+    def job_zip(job_id: int):
+        job = db.get_job(conn, job_id)
+        if job is None:
+            raise HTTPException(404)
+        entries = [(f"{n:02d}_{safe_filename(c['title'] or 'clip')}.mp4", clip_path(c, job, "file"))
+                   for n, c in enumerate(rendered_clips(job_id), 1)]
+        if not entries:
+            raise HTTPException(404)
+        with tempfile.NamedTemporaryFile(dir=job_dir(settings, job_id), suffix=".zip.tmp", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as z:  # mp4 is already compressed
+                for name, path in entries:
+                    z.write(path, name)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        return FileResponse(tmp_path, media_type="application/zip",
+                            headers=attachment(f"{safe_filename(job['title'] or 'clips')}.zip"),
+                            background=BackgroundTask(tmp_path.unlink, missing_ok=True))
+
+    @app.post("/clips/{clip_id}/delete")
+    def clip_delete(clip_id: int):
+        _, job = editable_clip(clip_id, for_edit=False)
+        db.delete_clip(conn, clip_id)
+        for f in (job_dir(settings, job["id"]) / "clips").glob(f"{clip_id}_*"):  # "5_" never matches clip 55's files
+            f.unlink(missing_ok=True)
+        return {"ok": True}
+
+    @app.get("/api/clips/{clip_id}/words")
+    def clip_words_api(clip_id: int):
+        clip, job = get_clip_or_404(clip_id)
+        fixes = json.loads(clip["corrections"] or "{}")
+        words = [{"i": i, "start": round(w.start, 3), "end": round(w.end, 3), "orig": w.text,
+                  "text": fixes.get(str(i), w.text)} for i, w in enumerate(clip_words(clip, job))]
+        return {"words": words, "captions_on": bool(clip["captions_on"]), "caption_style": clip["caption_style"]}
+
+    @app.post("/clips/{clip_id}/trim")
+    async def clip_trim(request: Request, clip_id: int):
+        body = await json_body(request)
+        clip, job = editable_clip(clip_id)
+        try:
+            start, end = _num(body.get("start")), _num(body.get("end"))
+        except ValueError:
+            raise HTTPException(400, "Start and end must be numbers.")
+        if not (0 <= start < end <= (job["duration"] or 0)):
+            raise HTTPException(400, "Pick a start and end inside the video.")
+        if end - start < MIN_CLIP:
+            raise HTTPException(400, f"A clip must be at least {MIN_CLIP:.0f} seconds long.")
+        return queue_rerender(clip, {"start": start, "end": end})
+
+    @app.post("/clips/{clip_id}/captions")
+    async def clip_captions(request: Request, clip_id: int):
+        body = await json_body(request)
+        clip, job = editable_clip(clip_id)
+        on, style, fixes = body.get("captions_on"), body.get("caption_style"), body.get("corrections")
+        if not isinstance(on, bool) or style not in STYLES or not isinstance(fixes, dict):
+            raise HTTPException(400, "Captions on/off, a caption style and the word fixes are required.")
+        count, clean = len(clip_words(clip, job)), {}
+        for k, v in fixes.items():
+            if not (isinstance(k, str) and k.isascii() and k.isdigit() and int(k) < count) or not isinstance(v, str):
+                raise HTTPException(400, "A word fix points at a word that isn't in this clip.")
+            text = " ".join(v.split())  # drops newlines and collapses spaces; "" removes the word
+            if len(text) > MAX_WORD:
+                raise HTTPException(400, f"A caption word can be at most {MAX_WORD} characters.")
+            clean[str(int(k))] = text
+        return queue_rerender(clip, {"captions_on": on, "caption_style": style, "corrections": clean})
 
     return app
