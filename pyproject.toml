@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipper"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "jinja2",
+  "python-multipart",
+  "itsdangerous",
+  "argon2-cffi",
+  "httpx",
+  "faster-whisper",
+  "mediapipe",
+  "scenedetect[opencv-headless]",
+  "numpy",
+  "yt-dlp",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["clipper"]
+
+[tool.pytest.ini_options]
+addopts = '-m "not slow"'
+markers = ["slow: needs GPU/models"]

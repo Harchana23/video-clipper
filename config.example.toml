@@ -1,0 +1,16 @@
+# Copy to config.toml and edit. Required: data_dir, password_hash, session_secret.
+data_dir = "D:/clips"                      # where jobs, sources and clips are stored (created if missing)
+password_hash = ""                         # argon2 hash of the login password
+session_secret = ""                        # long random string used to sign session cookies
+port = 8765                                # server port (binds 127.0.0.1 only)
+whisper_model = "large-v3-turbo"           # faster-whisper model name
+whisper_compute_type = "int8_float16"      # faster-whisper compute type (fits 4 GB GPU)
+ollama_model = "qwen3:4b"                  # Ollama model used for moment finding
+ollama_host = "http://127.0.0.1:11434"     # Ollama server URL
+source_retention_days = 14                 # days to keep source video after a job finishes
+clips_per_hour = 15                        # max clips selected per hour of source
+score_threshold = 55                       # minimum moment score (0-100) to keep
+caption_delay = 0.1                        # seconds added after a word's start before it shows
+default_captions_on = false                # captions default for new jobs
+default_caption_style = "bold_white"       # "bold_white" or "yellow_pop"
+cookie_secure = true                       # set false only for plain-http local testing
