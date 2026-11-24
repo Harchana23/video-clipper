@@ -24,3 +24,13 @@ def test_load_settings_rejects_unknown_key(tmp_path):
     p.write_text(f'data_dir = "{tmp_path.as_posix()}"\npassword_hash = "x"\nsession_secret = "s"\nbogus = 1\n')
     with pytest.raises(ValueError, match="bogus"):
         load_settings(p)
+
+
+@pytest.mark.parametrize("key", ["password_hash", "session_secret"])
+@pytest.mark.parametrize("val", ["", "   "])
+def test_load_settings_rejects_empty_secrets(tmp_path, key, val):
+    vals = {"password_hash": "x", "session_secret": "s", key: val}
+    p = tmp_path / "config.toml"
+    p.write_text(f'data_dir = "{tmp_path.as_posix()}"\npassword_hash = "{vals["password_hash"]}"\nsession_secret = "{vals["session_secret"]}"\n')
+    with pytest.raises(ValueError, match=key):
+        load_settings(p)

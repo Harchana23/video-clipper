@@ -34,6 +34,9 @@ def load_settings(path: Path) -> Settings:
     for key in ("data_dir", "password_hash", "session_secret"):
         if key not in raw:
             raise ValueError(f"missing required config key: {key}")
+    for key in ("password_hash", "session_secret"):
+        if not str(raw[key]).strip():
+            raise ValueError(f"config key must not be empty: {key}")
     raw["data_dir"] = Path(raw["data_dir"])
     s = Settings(**raw)
     s.data_dir.mkdir(parents=True, exist_ok=True)
