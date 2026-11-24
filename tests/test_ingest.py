@@ -27,6 +27,11 @@ def test_safe_filename(title, expected):
     assert safe_filename(title) == expected
 
 
+@pytest.mark.parametrize("title,expected", [(r"a\b{x}", "abx"), ("..", "clip"), ("CON", "clip"), ("con.txt", "clip"), ("hi.", "hi"), ("a/b", "ab")])
+def test_safe_filename_hostile(title, expected):
+    assert safe_filename(title) == expected
+
+
 def test_safe_filename_truncates():
     assert len(safe_filename("a" * 200)) == 80
 
@@ -55,7 +60,7 @@ def test_check_disk_ok(tmp_path, monkeypatch):
 
 class FakePopen:
     def __init__(self, args, job_dir, lines, rc=0, write=True, **kw):
-        self.args, self.rc, self.killed = args, rc, False
+        self.args, self.rc, self.killed, self.done, self.pid = args, rc, False, False, 4242
         self.stdout = io.StringIO("".join(lines))
         if write:
             (job_dir / "dl.mp4").write_bytes(b"v")
@@ -67,10 +72,11 @@ class FakePopen:
     kill = terminate
 
     def wait(self, timeout=None):
+        self.done = True
         return self.rc
 
     def poll(self):
-        return self.rc
+        return self.rc if (self.done or self.killed) else None
 
 
 def _patch(monkeypatch, job_dir, lines=(), rc=0, write=True, size="NA", title="My Title"):
@@ -149,3 +155,51 @@ def test_accept_upload_rejects_non_video(tmp_path):
     f.write_text("nope")
     with pytest.raises(IngestError):
         accept_upload(f, tmp_path)
+
+
+def test_download_requests_mp4_remux(tmp_path, monkeypatch):
+    calls, _ = _patch(monkeypatch, tmp_path)
+    download("https://x/y", tmp_path, lambda f: None, lambda: False)
+    assert "--remux-video" in calls[-1] and calls[-1][calls[-1].index("--remux-video") + 1] == "mp4"
+
+
+def test_download_rc0_without_file_gives_explicit_error(tmp_path, monkeypatch):
+    _patch(monkeypatch, tmp_path, ["[download] 100% of 1MiB\n"], rc=0, write=False)
+    with pytest.raises(IngestError, match="no video file was produced"):
+        download("https://x/y", tmp_path, lambda f: None, lambda: False)
+
+
+def test_download_clears_stale_partials(tmp_path, monkeypatch):
+    (tmp_path / "dl.mp4.part").write_bytes(b"stale")
+    (tmp_path / "dl.f137.mp4").write_bytes(b"stale")
+    _patch(monkeypatch, tmp_path, write=False)
+    seen = {}
+    orig = subprocess.Popen
+
+    def popen(args, **kw):
+        seen["left"] = sorted(f.name for f in tmp_path.glob("dl.*"))
+        return orig(args, **kw)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    with pytest.raises(IngestError):
+        download("https://x/y", tmp_path, lambda f: None, lambda: False)
+    assert seen["left"] == []
+
+
+def test_cancel_kills_process_tree(tmp_path, monkeypatch):
+    calls, procs = _patch(monkeypatch, tmp_path, ["[download] 10% of 1MiB\n"])
+    monkeypatch.setattr(ingest, "IS_WINDOWS", True)
+    with pytest.raises(Canceled):
+        download("https://x/y", tmp_path, lambda f: None, lambda: True)
+    assert ["taskkill", "/F", "/T", "/PID", "4242"] in calls and procs[0].killed
+
+
+def test_progress_exception_still_kills_process(tmp_path, monkeypatch):
+    _, procs = _patch(monkeypatch, tmp_path, ["[download] 10% of 1MiB\n"])
+
+    def boom(f):
+        raise RuntimeError("ui gone")
+
+    with pytest.raises(RuntimeError):
+        download("https://x/y", tmp_path, boom, lambda: False)
+    assert procs[0].killed
