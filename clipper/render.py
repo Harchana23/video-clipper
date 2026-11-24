@@ -58,7 +58,8 @@ def build_filter(plan: CropPlan, ass_name: str | None, cmd_name: str = "sendcmd.
     if plan.mode == "follow":
         cw = crop_width(plan.src_h)
         cmd = _sendcmd(plan.keys, cw, plan.src_w)
-        f = f"sendcmd=f={cmd_name},crop={cw}:{plan.src_h}:{plan.keys[0].x}:0,scale=1080:1920"
+        x0 = min(max(plan.keys[0].x, 0), plan.src_w - cw)
+        f = f"sendcmd=f={cmd_name},crop={cw}:{plan.src_h}:{x0}:0,scale=1080:1920"
     else:
         f = ("split=2[bg][fg];"
              "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:5[b];"
@@ -78,6 +79,7 @@ def render_clip(source: Path, out_path: Path, start: float, end: float, plan: Cr
     tmp = out_path.with_suffix(".tmp.mp4")
     cmd_file, ass_final = folder / f"{stem}.tmp.txt", folder / f"{stem}.ass"
     ass_tmp, jpg_tmp = folder / f"{stem}.ass.tmp", folder / f"{stem}.tmp.jpg"
+    jpg_final = out_path.with_suffix(".jpg")
     try:
         ass_name = None
         if words is not None:
@@ -95,19 +97,21 @@ def render_clip(source: Path, out_path: Path, start: float, end: float, plan: Cr
 
         enc = pick_encoder()
         r = encode(enc)
-        if r.returncode != 0 and enc is _NVENC:
-            _encoder = _X264  # NVENC failed mid-run; stop trying it
+        if r.returncode != 0 and enc is _NVENC and any(k in r.stderr.lower() for k in ("nvenc", "cuda", "nvcuda")):
+            _encoder = _X264  # NVENC itself failed; stop trying it
             r = encode(_X264)
         if r.returncode != 0:
             raise RenderError(_tail(r))
-        tmp.replace(out_path)
 
-        r = _run(["-ss", "1" if end - start > 1 else "0", "-i", str(out_path), "-frames:v", "1", "-q:v", "2", str(jpg_tmp)], folder)
+        # poster first, from the temp clip, so the final clip name only appears once everything succeeded
+        r = _run(["-ss", "1" if end - start > 1 else "0", "-i", str(tmp), "-frames:v", "1", "-q:v", "2", str(jpg_tmp)], folder)
         if r.returncode != 0:
             raise RenderError(_tail(r))
-        jpg_tmp.replace(out_path.with_suffix(".jpg"))
+        jpg_tmp.replace(jpg_final)
+        tmp.replace(out_path)
     except BaseException:
         ass_final.unlink(missing_ok=True)
+        jpg_final.unlink(missing_ok=True)
         raise
     finally:
         for p in (tmp, cmd_file, ass_tmp, jpg_tmp):

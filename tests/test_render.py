@@ -62,3 +62,42 @@ def test_render_clip_leaves_no_final_file_on_failure(tmp_path):
     with pytest.raises(RenderError):
         render_clip(tmp_path / "missing.mp4", tmp_path / "c.mp4", 0, 3, CropPlan("fit", 1920, 1080, []), None, None, 0.1)
     assert not (tmp_path / "c.mp4").exists() and not list(tmp_path.glob("*.tmp*"))
+
+
+def test_poster_failure_leaves_no_clip_poster_or_ass(tiny_video, tmp_path, monkeypatch):
+    import subprocess
+
+    import clipper.render as r
+    real = r._run
+
+    def fake(args, cwd):
+        if "-frames:v" in args:
+            return subprocess.CompletedProcess(args, 1, "", "poster boom")
+        return real(args, cwd)
+
+    monkeypatch.setattr(r, "_run", fake)
+    with pytest.raises(RenderError, match="poster boom"):
+        render_clip(tiny_video, tmp_path / "c.mp4", 0, 2, CropPlan("fit", 1280, 720, []),
+                    [Word(0.5, 0.8, "hi")], "bold_white", 0.1)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["tiny.mp4"]
+
+
+@pytest.mark.parametrize("stderr,calls,downgraded", [
+    ("Cannot load nvcuda.dll", 2, True),
+    ("Invalid data found when processing input", 1, False),
+])
+def test_only_encoder_errors_downgrade_nvenc(tmp_path, monkeypatch, stderr, calls, downgraded):
+    import subprocess
+
+    import clipper.render as r
+    seen = []
+    monkeypatch.setattr(r, "_encoder", r._NVENC)
+    monkeypatch.setattr(r, "_run", lambda a, c: seen.append(a) or subprocess.CompletedProcess(a, 1, "", stderr))
+    with pytest.raises(RenderError):
+        render_clip(tmp_path / "s.mp4", tmp_path / "c.mp4", 0, 3, CropPlan("fit", 1920, 1080, []), None, None, 0.1)
+    assert len(seen) == calls and (r._encoder is r._X264) == downgraded
+
+
+def test_follow_first_x_is_clamped():
+    f, _ = build_filter(CropPlan("follow", 1280, 720, [CropKey(0, 5000)]), None)
+    assert "crop=406:720:874:0" in f
