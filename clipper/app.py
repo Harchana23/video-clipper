@@ -28,7 +28,7 @@ from clipper.captions import words_in_range
 from clipper.config import Settings
 from clipper.ingest import safe_filename
 from clipper.models import LENGTH_RANGES, CaptionStyle, Transcript, VideoType
-from clipper.worker import Worker, job_dir
+from clipper.worker import Worker, _find_source, job_dir
 
 HERE = Path(__file__).parent
 UPLOAD_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
@@ -52,6 +52,7 @@ PROCESSING = "This video is still processing."
 CLEANED_UP = "The source video was cleaned up, so this clip can't be changed."
 BUSY = "This clip is already being re-rendered."
 DELETE_BUSY = "This clip is being re-rendered."
+UPLOAD_GONE = "The uploaded file was cleaned up — upload it again."
 
 
 def _mmss(t: float) -> str:
@@ -249,8 +250,8 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
         job = db.get_job(conn, job_id)
         if job is None:
             raise HTTPException(404)
-        if job["status"] in ("queued", "running"):
-            db.update_job(conn, job_id, cancel_requested=1)  # the worker notices at its next checkpoint
+        if job["status"] in ("queued", "running") and not db.cancel_if_queued(conn, job_id, time.time()):
+            db.update_job(conn, job_id, cancel_requested=1)  # running: the worker notices at its next checkpoint
         return {"ok": True}
 
     @app.post("/jobs/{job_id}/retry")
@@ -260,8 +261,11 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
             raise HTTPException(404)
         if job["status"] not in ("failed", "canceled"):
             raise HTTPException(409, "Only failed or canceled jobs can be retried")
+        if (job["upload_path"] and not Path(job["upload_path"]).is_file()
+                and _find_source(job_dir(settings, job_id)) is None):  # neither the upload nor its moved copy
+            raise HTTPException(409, UPLOAD_GONE)
         db.update_job(conn, job_id, status="queued", error=None, cancel_requested=0, finished_at=None,
-                      step=0, step_progress=0.0)
+                      step=0, step_progress=0.0, source_deleted=0)  # a link downloads again if it was cleaned up
         return {"ok": True}
 
     @app.get("/media/thumbs/{job_id}.jpg")
@@ -329,10 +333,21 @@ def create_app(settings: Settings, db_path: Path, start_worker: bool = True) -> 
         job = db.get_job(conn, job_id)
         if job is None or job["kind"] == "rerender":
             raise HTTPException(404)
-        busy = {j["clip_id"] for j in db.list_jobs(conn)[0] if j["kind"] == "rerender"}
+        active, finished = db.list_jobs(conn)
+        busy = {j["clip_id"] for j in active if j["kind"] == "rerender"}
+        last = {}  # clip id -> its most recent finished re-render (finished is newest first)
+        for j in finished:
+            if j["kind"] == "rerender":
+                last.setdefault(j["clip_id"], j)
+
+        def rerender_error(cid: int) -> str | None:  # shown on the card until the next re-render succeeds
+            j = last.get(cid)
+            return (j["error"] or "Re-render failed.") if j and j["status"] == "failed" and cid not in busy else None
+
         clips = [{"id": c["id"], "title": c["title"], "score": c["score"], "version": c["version"],
                   "length": _mmss(c["end"] - c["start"]), "at": _mmss(c["start"]), "start": c["start"],
-                  "end": c["end"], "busy": c["id"] in busy, "fixes": json.loads(c["corrections"] or "{}") != {}} for c in rendered_clips(job_id)]
+                  "end": c["end"], "busy": c["id"] in busy, "fixes": json.loads(c["corrections"] or "{}") != {},
+                  "failed": rerender_error(c["id"])} for c in rendered_clips(job_id)]
         ctx = {"job": job, "title": job["title"] or job["source_url"] or "Untitled", "clips": clips,
                "styles": STYLES, "duration": job["duration"] or 0, "done": job["status"] == "done",
                "cleaned": bool(job["source_deleted"]), "when": time.strftime(

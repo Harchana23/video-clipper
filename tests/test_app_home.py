@@ -215,3 +215,34 @@ def test_unauthenticated_upload_is_rejected_before_body_is_read(client, ctx, mon
     assert r.status_code == 401
     assert client.post("/jobs", data=OK).status_code == 401
     assert list((ctx[0].data_dir / "uploads").iterdir()) == []
+
+
+def test_cancel_of_queued_job_is_immediate(authed, conn):
+    jid = db.create_job(conn, kind="video", status="queued")
+    assert authed.post(f"/jobs/{jid}/cancel").status_code == 200
+    j = db.get_job(conn, jid)
+    assert (j["status"], j["cancel_requested"]) == ("canceled", 0) and j["finished_at"]
+    assert db.next_job(conn) is None  # the worker can no longer claim it
+
+
+def test_cancel_if_queued_loses_to_a_claim(conn):
+    jid = db.create_job(conn, kind="video", status="queued")
+    assert db.next_job(conn)["id"] == jid  # the worker claimed it first
+    assert db.cancel_if_queued(conn, jid, time.time()) is False
+    assert db.get_job(conn, jid)["status"] == "running"
+
+
+def test_retry_after_cleanup(authed, ctx, conn):
+    link = db.create_job(conn, kind="video", status="failed", source_url="https://x/y", source_deleted=1)
+    assert authed.post(f"/jobs/{link}/retry").status_code == 200
+    j = db.get_job(conn, link)
+    assert (j["status"], j["source_deleted"]) == ("queued", 0)  # downloads again
+    gone = db.create_job(conn, kind="video", status="failed", source_deleted=1,
+                         upload_path=str(ctx[0].data_dir / "uploads" / "missing.mp4"))
+    r = authed.post(f"/jobs/{gone}/retry")
+    assert r.status_code == 409 and r.json()["detail"] == "The uploaded file was cleaned up — upload it again."
+    assert db.get_job(conn, gone)["status"] == "failed"
+    kept = ctx[0].data_dir / "uploads" / "kept.mp4"
+    kept.write_bytes(b"v")
+    still = db.create_job(conn, kind="video", status="failed", upload_path=str(kept))
+    assert authed.post(f"/jobs/{still}/retry").status_code == 200

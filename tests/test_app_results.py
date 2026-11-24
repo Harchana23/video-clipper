@@ -277,3 +277,18 @@ def test_delete_survives_locked_files(authed, conn, clip_on_disk, monkeypatch):
 def test_poster_url_is_versioned(authed, conn, clip_on_disk):
     jid = db.get_clip(conn, clip_on_disk)["job_id"]
     assert f"/media/posters/{clip_on_disk}.jpg?v=1" in authed.get(f"/jobs/{jid}").text
+
+
+def test_failed_rerender_error_shows_on_its_card(authed, ctx, conn, clip_on_disk):
+    jid = db.get_clip(conn, clip_on_disk)["job_id"]
+    other = make_clip(conn, ctx[0], jid, title="Other", start=50.0, end=80.0)
+    db.create_job(conn, kind="rerender", status="done", clip_id=clip_on_disk, finished_at=time.time() - 10)
+    db.create_job(conn, kind="rerender", status="failed", clip_id=clip_on_disk, finished_at=time.time(),
+                  error="Rendering <a> clip failed.")
+    html = authed.get(f"/jobs/{jid}").text
+    assert html.count("Rendering &lt;a&gt; clip failed.") == 1 and "<a> clip" not in html  # escaped, one card
+    card = html[html.index(f'data-id="{clip_on_disk}"'):html.index(f'data-id="{other}"')]  # same score: id order
+    assert "Rendering &lt;a&gt; clip failed." in card
+    # a later successful re-render clears the note
+    db.create_job(conn, kind="rerender", status="done", clip_id=clip_on_disk, finished_at=time.time() + 10)
+    assert "clip failed" not in authed.get(f"/jobs/{jid}").text

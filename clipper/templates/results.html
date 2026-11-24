@@ -28,6 +28,7 @@
         <button type="button" class="cap"{% if cleaned or not done %} disabled{% endif %}>Aa Caption</button>
       </div>
       {% if cleaned %}<div class="rp-note">Source cleaned up — download only</div>{% endif %}
+      {% if c.failed %}<div class="rp-note">The last change didn't work: {{ c.failed }}</div>{% endif %}
       <div class="rp-panel" hidden></div>
     </div>
   {% endfor %}

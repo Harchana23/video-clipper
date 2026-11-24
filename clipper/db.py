@@ -99,6 +99,13 @@ def next_rerender(conn):
     return _claim(conn, " AND kind = 'rerender'")
 
 
+def cancel_if_queued(conn, job_id, now: float) -> bool:
+    """Cancel a job the worker hasn't claimed; False if it is already running (or finished)."""
+    with _lock:  # one guarded UPDATE, so it can't interleave with _claim's transaction
+        return conn.execute("UPDATE jobs SET status = 'canceled', finished_at = ? WHERE id = ? AND status = 'queued'",
+                            (now, job_id)).rowcount == 1
+
+
 def requeue_running(conn) -> int:
     with _lock:
         return conn.execute("UPDATE jobs SET status = 'queued' WHERE status = 'running'").rowcount

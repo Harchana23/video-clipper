@@ -29,7 +29,13 @@
   });
 
   // --- queue ----------------------------------------------------------------------
-  const post = (url) => fetch(url, { method: "POST" }).then(poll);
+  const post = (url) => fetch(url, { method: "POST" }).then(async (r) => {
+    if (!r.ok) {  // e.g. retrying an upload whose file was cleaned up
+      const d = await r.json().catch(() => ({}));
+      if (typeof d.detail === "string") alert(d.detail);
+    }
+    poll();
+  });
   const button = (cls, label, url) => {
     const b = el("button", cls, label);
     b.type = "button";
