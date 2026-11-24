@@ -213,3 +213,35 @@ def test_energy_score_peak_window_scores_higher():
 def test_energy_profile_normalised(tiny_video):
     p = ml.energy_profile(tiny_video)
     assert 9 <= len(p) <= 11 and p.max() == pytest.approx(1.0)
+
+
+def test_ollama_timeout_is_plain(settings, monkeypatch):
+    def handler(req):
+        raise httpx.ReadTimeout("slow")
+
+    _mock(monkeypatch, handler)
+    with pytest.raises(ml.MomentsError, match="took too long to answer. Try again, or use a smaller ollama_model"):
+        ml.ollama_candidates("x", 0, 600, "talk", 30, 90, settings)
+
+
+def test_ollama_http_error_is_plain(settings, monkeypatch):
+    _mock(monkeypatch, lambda r: httpx.Response(500, json={"error": "boom"}))
+    with pytest.raises(ml.MomentsError, match=r"returned an error \(HTTP 500\)\. Check that Ollama is running\."):
+        ml.ollama_candidates("x", 0, 600, "talk", 30, 90, settings)
+
+
+@pytest.mark.parametrize("energy", [None, np.zeros(0)])
+def test_find_moments_always_one_clip_over_two_minutes(settings, tmp_path, monkeypatch, energy):
+    _fake(monkeypatch, 300, energy)  # 5-min talk; with and without an audio energy profile
+    monkeypatch.setattr(ml, "unload_model", lambda s: None)
+    monkeypatch.setattr(ml, "ollama_candidates", lambda *a, **k: [])  # the model finds nothing
+    out = _run(settings, tmp_path, Transcript("en", _words(600), []))  # dense words: no audio candidates
+    assert len(out) == 1 and 0 <= out[0].start < out[0].end <= 300
+    assert 30 <= out[0].end - out[0].start <= 90
+
+
+def test_find_moments_short_video_may_have_none(settings, tmp_path, monkeypatch):
+    _fake(monkeypatch, 100)
+    monkeypatch.setattr(ml, "unload_model", lambda s: None)
+    monkeypatch.setattr(ml, "ollama_candidates", lambda *a, **k: [])
+    assert _run(settings, tmp_path, Transcript("en", _words(200), [])) == []

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -16,7 +17,11 @@ _encoder: list[str] | None = None
 
 
 class RenderError(Exception):
-    """Message is the tail of ffmpeg's stderr."""
+    """Plain message for the owner; .details holds ffmpeg's stderr tail for the worker log."""
+
+    def __init__(self, details: str = ""):
+        super().__init__("Rendering a clip failed. Details are in logs\\worker.log.")
+        self.details = details
 
 
 def _run(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -97,8 +102,10 @@ def render_clip(source: Path, out_path: Path, start: float, end: float, plan: Cr
 
         enc = pick_encoder()
         r = encode(enc)
-        if r.returncode != 0 and enc is _NVENC and any(k in r.stderr.lower() for k in ("nvenc", "cuda", "nvcuda")):
-            _encoder = _X264  # NVENC itself failed; stop trying it
+        low = r.stderr.lower()
+        if r.returncode != 0 and enc is _NVENC and any(k in low for k in ("nvenc", "cuda", "nvcuda")):
+            if not re.search(r"out of memory|\boom\b", low):  # VRAM busy right now is not a broken NVENC
+                _encoder = _X264  # NVENC itself failed; stop trying it
             r = encode(_X264)
         if r.returncode != 0:
             raise RenderError(_tail(r))

@@ -49,9 +49,13 @@ def _generate(c: httpx.Client, settings: Settings, body: dict) -> httpx.Response
         r = c.post(f"{settings.ollama_host}/api/generate", json=body)
     except (httpx.ConnectError, httpx.ConnectTimeout):
         raise MomentsError(f"Ollama is not reachable at {settings.ollama_host}. Start Ollama and try again.")
+    except httpx.TimeoutException:  # after ConnectTimeout above, which is also one
+        raise MomentsError("The local AI model took too long to answer. "
+                           "Try again, or use a smaller ollama_model in config.toml.")
     if r.status_code == 404:
         raise MomentsError(f"Model {settings.ollama_model} isn't installed. Run: ollama pull {settings.ollama_model}")
-    r.raise_for_status()
+    if r.is_error:
+        raise MomentsError(f"The local AI model returned an error (HTTP {r.status_code}). Check that Ollama is running.")
     return r
 
 
@@ -230,16 +234,19 @@ def find_moments(source: Path, transcript: Transcript, video_type: VideoType, pr
         if len(words) < 20 * duration / 600 and len(profile):
             cands += audio_candidates(profile, HOP, lo, hi, max(3, math.ceil(duration / 600)))
 
-        moments = []
-        for c in cands:
-            s = snap(c, words, lo, hi)
-            if s is None:
-                continue
+        def scored(s: Candidate) -> Moment:
             inside = [w for w in words if s.start <= w.start < s.end]
             hook = hook_score(" ".join(w.text for w in inside))
             score = final_score(s.ai_score, energy_score(profile, HOP, s.start, s.end),
                                 pace_score(inside), hook, video_type)
-            moments.append(Moment(s.start, s.end, s.title, score))
+            return Moment(s.start, s.end, s.title, score)
+
+        moments = [scored(s) for c in cands if (s := snap(c, words, lo, hi)) is not None]
+        if not moments and duration > 120:  # spec: a video over 2 minutes always gets at least one clip
+            width = min((lo + hi) / 2, duration)
+            fallback = (audio_candidates(profile, HOP, lo, hi, 1) if len(profile) else
+                        [Candidate((duration - width) / 2, (duration + width) / 2, "Highlight", 50, "middle")])
+            moments = [scored(snap(c, words, lo, hi) or c) for c in fallback]
         result = select(dedupe(moments), duration, settings.score_threshold, settings.clips_per_hour)
         _atomic_write(final, [asdict(m) for m in result])
         return result

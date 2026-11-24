@@ -77,3 +77,9 @@ def test_build_ass_styles_and_resolution():
     assert "PlayResX: 1080" in ass and "PlayResY: 1920" in ass
     assert "Dialogue: 0,0:00:00.00,0:00:01.00" in ass
     assert "&H0042C5F5" in ass
+
+
+def test_build_ass_start_rounds_up_to_centisecond():
+    ass = build_ass([CaptionEvent(1.234, 2.234, "HI"), CaptionEvent(1.1, 1.5, "X")], "bold_white")
+    assert "Dialogue: 0,0:00:01.24,0:00:02.23," in ass  # start never earlier than computed; end nearest
+    assert "Dialogue: 0,0:00:01.10,0:00:01.50," in ass  # exact centiseconds stay put

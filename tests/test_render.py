@@ -76,14 +76,18 @@ def test_poster_failure_leaves_no_clip_poster_or_ass(tiny_video, tmp_path, monke
         return real(args, cwd)
 
     monkeypatch.setattr(r, "_run", fake)
-    with pytest.raises(RenderError, match="poster boom"):
+    with pytest.raises(RenderError) as e:
         render_clip(tiny_video, tmp_path / "c.mp4", 0, 2, CropPlan("fit", 1280, 720, []),
                     [Word(0.5, 0.8, "hi")], "bold_white", 0.1)
+    assert e.value.details == "poster boom"  # stderr goes to the log, not the owner
+    assert str(e.value) == "Rendering a clip failed. Details are in logs\\worker.log."
     assert sorted(p.name for p in tmp_path.iterdir()) == ["tiny.mp4"]
 
 
 @pytest.mark.parametrize("stderr,calls,downgraded", [
     ("Cannot load nvcuda.dll", 2, True),
+    ("[h264_nvenc @ 0x1] OpenEncodeSessionEx failed: out of memory (10)", 2, False),
+    ("[h264_nvenc @ 0x1] CUDA OOM", 2, False),
     ("Invalid data found when processing input", 1, False),
 ])
 def test_only_encoder_errors_downgrade_nvenc(tmp_path, monkeypatch, stderr, calls, downgraded):

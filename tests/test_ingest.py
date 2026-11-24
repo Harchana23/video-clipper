@@ -203,3 +203,16 @@ def test_progress_exception_still_kills_process(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         download("https://x/y", tmp_path, boom, lambda: False)
     assert procs[0].killed
+
+
+def test_generic_download_error_points_at_ytdlp_update():
+    assert map_ytdlp_error("boom\nsomething odd").endswith(" If this keeps happening, update yt-dlp (see README).")
+    assert "update yt-dlp" not in map_ytdlp_error("ERROR: Private video")
+
+
+def test_download_takes_only_first_playlist_item(tmp_path, monkeypatch):
+    calls, _ = _patch(monkeypatch, tmp_path)
+    download("https://x/@channel", tmp_path, lambda f: None, lambda: False)
+    assert len(calls) == 2  # metadata, then download
+    for args in calls:
+        assert args[args.index("-I") + 1] == "1"

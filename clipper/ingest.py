@@ -60,7 +60,8 @@ def map_ytdlp_error(stderr: str) -> str:
     if "unsupported url" in low:
         return "This site isn't supported."
     lines = [ln for ln in stderr.strip().splitlines() if ln.strip()]
-    return "Download failed: " + (lines[-1].strip()[:200] if lines else "unknown error")
+    return ("Download failed: " + (lines[-1].strip()[:200] if lines else "unknown error")
+            + " If this keeps happening, update yt-dlp (see README).")
 
 
 def check_disk(directory: Path, needed_bytes: int) -> None:
@@ -89,7 +90,7 @@ def download(url: str, job_dir: Path, progress: Progress, should_stop: ShouldSto
         title = title_file.read_text(encoding="utf-8") if title_file.exists() else "clip"
         return SourceInfo(source, title, probe(source).duration, thumb if thumb.exists() else None)
 
-    base = [sys.executable, "-m", "yt_dlp", "--no-playlist"]
+    base = [sys.executable, "-m", "yt_dlp", "--no-playlist", "-I", "1"]  # channel/playlist links: first item only
     try:
         r = subprocess.run(base + ["--skip-download", "--print", "%(title)s", "--print", "%(filesize_approx)s", url],
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)

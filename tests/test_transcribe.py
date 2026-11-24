@@ -109,3 +109,18 @@ def test_transcribe_multi_chunk_offsets_and_partial_resume(tmp_path, monkeypatch
     assert len(calls) == 2  # chunks 0 and 2 only
     assert [(w.start, w.text) for w in t.words] == [(0.1, "x"), (2.1, "saved"), (4.1, "x")]
     assert prog == [1 / 3, 2 / 3, 1.0]
+
+
+def test_register_cuda_dlls_only_once(tmp_path, monkeypatch):
+    (tmp_path / "nvidia" / "cublas" / "bin").mkdir(parents=True)
+    added = []
+    monkeypatch.setattr(tr.sys, "platform", "win32")
+    monkeypatch.setattr(tr.sys, "path", [str(tmp_path)])
+    monkeypatch.setattr(tr.os, "add_dll_directory", added.append, raising=False)
+    monkeypatch.setattr(tr, "_dlls_registered", False)
+    monkeypatch.setenv("PATH", "base")
+    tr._register_cuda_dlls()
+    first = tr.os.environ["PATH"]
+    assert first.endswith("base") and len(added) == 1
+    tr._register_cuda_dlls()
+    assert tr.os.environ["PATH"] == first and len(added) == 1

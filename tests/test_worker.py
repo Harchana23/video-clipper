@@ -10,7 +10,7 @@ from clipper.config import Settings
 from clipper.ingest import IngestError
 from clipper.models import Canceled, CropPlan, MediaInfo, Moment, SourceInfo, Transcript, Word
 from clipper.render import RenderError
-from clipper.worker import Worker, cleanup_sources, job_dir
+from clipper.worker import LOG_HINT, OOM, Worker, cleanup_sources, job_dir
 
 DAY = 86400
 MOMENTS = [Moment(10.0, 40.0, "First", 90), Moment(50.0, 80.0, "Second", 70)]
@@ -358,7 +358,8 @@ def test_rerender_failure_keeps_clip_and_files(settings, tmp_path, conn):
     fake.fail["render"] = RenderError("ffmpeg exploded")
     assert make_worker(settings, tmp_path, fake).run_once()
     job = db.get_job(conn, rid)
-    assert job["status"] == "failed" and job["error"] == "ffmpeg exploded"
+    assert job["status"] == "failed" and job["error"] == RenderError().args[0]  # plain words, not stderr
+    assert "ffmpeg exploded" in (settings.data_dir / "logs" / "worker.log").read_text(encoding="utf-8")
     assert dict(db.get_clip(conn, cid)) == before and old.exists() and old.with_suffix(".jpg").exists()
 
 
@@ -408,10 +409,62 @@ def test_unexpected_error_is_logged_and_loop_survives(settings, tmp_path, conn):
     w = make_worker(settings, tmp_path, fake)
     assert w.run_once()
     job = db.get_job(conn, bad)
-    assert job["status"] == "failed" and job["error"] == "Something went wrong: ValueError"
+    assert job["status"] == "failed" and job["error"] == "Something went wrong: ValueError. " + LOG_HINT
     log = (settings.data_dir / "logs" / "worker.log").read_text(encoding="utf-8")
     assert "ValueError: boom" in log and "Traceback" in log
     del fake.fail["transcribe"]
     assert w.run_once()
     assert db.get_job(conn, good)["status"] == "done"
     assert w.run_once() is False  # queue empty
+
+
+def test_generic_messages_name_the_log_and_map_out_of_memory(settings, tmp_path, conn):
+    assert LOG_HINT == r"Details are in logs\worker.log."
+    fake = FakeSteps()
+    fake.fail["transcribe"] = RuntimeError("CUDA failed with error out of memory")
+    jid = video_job(conn)
+    assert make_worker(settings, tmp_path, fake).run_once()
+    assert db.get_job(conn, jid)["error"] == OOM
+    assert OOM == "The graphics card ran out of memory. Try a smaller whisper_model or ollama_model in config.toml."
+
+
+def test_rerender_runs_during_long_download(settings, tmp_path, conn, monkeypatch):
+    _, cid, _ = done_job_with_clip(conn, settings)
+    fake = FakeSteps(MOMENTS[:1])
+    jid = video_job(conn)
+    rids = []
+    real_download = fake.download
+
+    def slow_download(url, d, progress, should_stop):
+        rids.append(db.create_job(conn, kind="rerender", status="queued", priority=10, clip_id=cid,
+                                  params=json.dumps({"start": 12.0})))
+        progress(0.1)  # drains: the first drain is never rate-limited
+        rids.append(db.create_job(conn, kind="rerender", status="queued", priority=10, clip_id=cid,
+                                  params=json.dumps({"start": 13.0})))
+        progress(0.2)  # within 5 s of the last drain: waits
+        assert db.get_job(conn, rids[1])["status"] == "queued"
+        return real_download(url, d, progress, should_stop)
+
+    fake.download = slow_download
+    assert make_worker(settings, tmp_path, fake).run_once()
+    assert db.get_job(conn, rids[0])["status"] == "done" and db.get_job(conn, jid)["status"] == "done"
+    seq = names(fake)
+    assert seq.index("render") < seq.index("transcribe")  # the first re-render ran inside step 1
+
+
+def test_cleanup_sources_covers_failed_and_canceled(settings, conn, tmp_path):
+    now = time.time()
+    upload = tmp_path / "left.mp4"
+    upload.write_bytes(b"u")
+    failed = video_job(conn, status="failed", finished_at=now - 15 * DAY)
+    canceled = video_job(conn, status="canceled", finished_at=now - 15 * DAY, source_url=None,
+                         upload_path=str(upload))
+    young = video_job(conn, status="failed", finished_at=now - 1 * DAY)
+    for jid in (failed, young):
+        d = job_dir(settings, jid)
+        d.mkdir(parents=True)
+        (d / "source.mp4").write_bytes(b"v")
+    assert cleanup_sources(conn, settings, now) == 2
+    assert not (job_dir(settings, failed) / "source.mp4").exists() and not upload.exists()
+    assert db.get_job(conn, failed)["source_deleted"] == db.get_job(conn, canceled)["source_deleted"] == 1
+    assert (job_dir(settings, young) / "source.mp4").exists() and db.get_job(conn, young)["source_deleted"] == 0

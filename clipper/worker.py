@@ -19,6 +19,8 @@ from clipper.render import RenderError, render_clip
 from clipper.transcribe import transcribe
 
 GONE = "The source video was cleaned up, so this clip can't be changed."
+LOG_HINT = r"Details are in logs\worker.log."
+OOM = "The graphics card ran out of memory. Try a smaller whisper_model or ollama_model in config.toml."
 _PLAIN_ERRORS = (IngestError, MomentsError, RenderError)
 
 
@@ -62,8 +64,8 @@ def _corrections(raw) -> dict[int, str]:
 def cleanup_sources(conn, settings: Settings, now: float) -> int:
     cutoff = now - settings.source_retention_days * 86400
     count = 0
-    for job in db.list_jobs(conn)[1]:
-        if (job["status"] != "done" or job["kind"] == "rerender" or job["source_deleted"]
+    for job in db.list_jobs(conn)[1]:  # done, failed and canceled: all hold sources
+        if (job["kind"] == "rerender" or job["source_deleted"]
                 or not job["finished_at"] or job["finished_at"] >= cutoff):
             continue
         d = job_dir(settings, job["id"])
@@ -71,6 +73,8 @@ def cleanup_sources(conn, settings: Settings, now: float) -> int:
             for p in d.glob("source.*"):
                 if p.suffix != ".jpg":  # keep the small thumbnail for the job card
                     p.unlink()
+            if job["upload_path"]:  # an upload that failed before it was moved into the job folder
+                Path(job["upload_path"]).unlink(missing_ok=True)
         except OSError:  # file in use (e.g. being streamed); try again next hour
             continue
         db.update_job(conn, job["id"], source_deleted=1)
@@ -86,6 +90,7 @@ class Worker(threading.Thread):
         self.conn = db.connect(Path(db_path))  # own connection, never the web app's
         self._stop_event = threading.Event()
         self._last_cleanup = float("-inf")
+        self._last_dl_drain = float("-inf")
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -129,18 +134,21 @@ class Worker(threading.Thread):
         except _Paused:
             db.update_job(self.conn, jid, status="queued")
         except (JobError, *_PLAIN_ERRORS) as e:
+            if isinstance(e, RenderError):
+                self._log(jid, e.details)  # the owner sees a plain message; ffmpeg's own words go to the log
             db.update_job(self.conn, jid, status="failed", error=str(e), finished_at=time.time())
         except Exception as e:
             self._log(jid)
-            db.update_job(self.conn, jid, status="failed", error=f"Something went wrong: {type(e).__name__}",
-                          finished_at=time.time())
+            msg = OOM if "out of memory" in str(e).lower() else f"Something went wrong: {type(e).__name__}. {LOG_HINT}"
+            db.update_job(self.conn, jid, status="failed", error=msg, finished_at=time.time())
 
-    def _log(self, job_id) -> None:
+    def _log(self, job_id, details: str = "") -> None:
         try:
             logs = self.settings.data_dir / "logs"
             logs.mkdir(parents=True, exist_ok=True)
             with open(logs / "worker.log", "a", encoding="utf-8") as f:
-                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} job {job_id}\n{traceback.format_exc()}\n")
+                extra = f"ffmpeg said:\n{details}\n" if details else ""
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} job {job_id}\n{traceback.format_exc()}{extra}\n")
         except OSError:
             pass
 
@@ -174,6 +182,15 @@ class Worker(threading.Thread):
             self._drain_rerenders()
         return progress
 
+    def _download_progress(self, job_id: int) -> Callable[[float], None]:
+        # a long download must not hold up re-renders; each drain costs SQLite reads, so at most every 5 s
+        def progress(f: float) -> None:
+            db.update_job(self.conn, job_id, step_progress=f)
+            if time.monotonic() - self._last_dl_drain >= 5:
+                self._last_dl_drain = time.monotonic()
+                self._drain_rerenders()
+        return progress
+
     def _drain_rerenders(self) -> None:
         while (job := db.next_rerender(self.conn)) is not None:
             self._process(job)
@@ -192,8 +209,7 @@ class Worker(threading.Thread):
         source = _find_source(d)
         if source is None:
             if job["source_url"]:
-                info = s.download(job["source_url"], d, lambda f: db.update_job(conn, jid, step_progress=f),
-                                  should_stop)
+                info = s.download(job["source_url"], d, self._download_progress(jid), should_stop)
             else:
                 info = s.accept_upload(Path(job["upload_path"]), d)
             source = info.path

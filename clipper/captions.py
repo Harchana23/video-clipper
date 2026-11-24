@@ -59,8 +59,9 @@ def chunk_words(
     return events
 
 
-def _ass_time(t: float) -> str:
-    cs = round(max(t, 0) * 100)
+def _ass_time(t: float, up: bool = False) -> str:
+    # starts round UP to the centisecond so no event begins before its computed start
+    cs = math.ceil(round(max(t, 0) * 100, 6)) if up else round(max(t, 0) * 100)
     h, cs = divmod(cs, 360000)
     m, cs = divmod(cs, 6000)
     s, cs = divmod(cs, 100)
@@ -93,6 +94,6 @@ def build_ass(events: list[CaptionEvent], style: CaptionStyle, width: int = 1080
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
     lines += [
-        f"Dialogue: 0,{_ass_time(e.start)},{_ass_time(e.end)},{style},,0,0,0,,{_escape(e.text)}" for e in events
+        f"Dialogue: 0,{_ass_time(e.start, up=True)},{_ass_time(e.end)},{style},,0,0,0,,{_escape(e.text)}" for e in events
     ]
     return "\n".join(lines) + "\n"

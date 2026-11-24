@@ -12,12 +12,16 @@ from clipper.ingest import probe
 from clipper.models import Canceled, Progress, Segment, ShouldStop, Transcript, Word
 
 CHUNK_SECONDS = 600
+_dlls_registered = False
 
 
 def _register_cuda_dlls() -> None:
     # Windows: cuBLAS/cuDNN come from the nvidia-* pip wheels; make their DLLs findable.
-    if sys.platform != "win32":
+    # Once per process: repeating it would grow PATH past Windows' 32767-char limit.
+    global _dlls_registered
+    if sys.platform != "win32" or _dlls_registered:
         return
+    _dlls_registered = True
     for p in sys.path:
         for lib in ("cublas", "cudnn"):
             d = Path(p) / "nvidia" / lib / "bin"
