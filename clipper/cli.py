@@ -66,6 +66,21 @@ def find_moments_cmd(args: argparse.Namespace) -> int:
     return 0
 
 
+def uvicorn_kwargs(settings, port: int | None) -> dict:
+    # host is fixed: the app is reached remotely only through a tunnel to localhost, never bound publicly
+    return {"host": "127.0.0.1", "port": port or settings.port}
+
+
+def serve_cmd(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    from clipper.app import create_app
+    settings = load_settings(Path(args.config))
+    app = create_app(settings, settings.data_dir / "clipper.db", start_worker=True)
+    uvicorn.run(app, **uvicorn_kwargs(settings, args.port))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="clipper")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -75,6 +90,10 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--length", choices=list(LENGTH_RANGES), default="auto")
     f.add_argument("--config", default="config.toml")
     f.set_defaults(func=find_moments_cmd)
+    sv = sub.add_parser("serve", help="start the web app and the background worker on 127.0.0.1")
+    sv.add_argument("--config", default="config.toml")
+    sv.add_argument("--port", type=int, default=None)
+    sv.set_defaults(func=serve_cmd)
     args = p.parse_args(argv)
     try:
         return args.func(args)

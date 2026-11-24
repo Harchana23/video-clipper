@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="top"><b>✂ Clipper</b>
+  <form method="post" action="/logout"><button class="ghost" type="submit">Sign out</button></form></div>
+
+<form id="add" class="add" method="post" action="/jobs" enctype="multipart/form-data">
+  {% if error %}<div class="msg err" role="alert">{{ error }}</div>{% endif %}
+  <div class="row">
+    <input class="in" type="text" name="url" placeholder="Paste a YouTube, Twitch VOD or other video link…" inputmode="url" autocomplete="off">
+    <button class="btn" type="submit">Get clips</button>
+  </div>
+  <label class="drop" id="drop">…or drag a video file here (MP4, MOV, MKV, WebM) · <u>browse</u>
+    <input type="file" name="file" id="file" accept=".mp4,.mov,.mkv,.webm,.m4v,video/*" hidden>
+    <span id="fname" class="fname"></span>
+  </label>
+  <div class="opts">
+    <label>Video type <select name="video_type">
+      {% for v, label in video_types.items() %}<option value="{{ v }}">{{ label }}</option>{% endfor %}
+    </select></label>
+    <label>Clip length <select name="length_preset">
+      {% for v, label in lengths.items() %}<option value="{{ v }}">{{ label }}</option>{% endfor %}
+    </select></label>
+    <label class="check"><input type="checkbox" name="captions_on" id="captions_on" value="on"{% if captions_on %} checked{% endif %}> Captions</label>
+    <label id="style_wrap" hidden>Style <select name="caption_style">
+      {% for v, label in styles.items() %}<option value="{{ v }}"{% if v == caption_style %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select></label>
+  </div>
+</form>
+
+<div class="sec">Queue</div>
+<div id="queue"><div class="small left">Nothing running.</div></div>
+<div class="sec">Finished</div>
+<div id="finished"><div class="small left">Nothing yet.</div></div>
+{% endblock %}
+{% block scripts %}<script src="/static/app.js"></script>{% endblock %}
