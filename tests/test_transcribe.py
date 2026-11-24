@@ -84,3 +84,28 @@ def test_transcribe_raises_canceled(tmp_path, monkeypatch, tiny_video):
 def test_transcribe_real_speech(speech_video, tmp_path):  # fixture added in Task 13
     t = transcribe(speech_video, tmp_path, "large-v3-turbo", "int8_float16", lambda f: None, lambda: False)
     assert len(t.words) > 20 and all(w.end >= w.start for w in t.words)
+
+
+def test_transcribe_no_audio_stream_returns_empty(tmp_path, monkeypatch):
+    import subprocess
+    v = tmp_path / "silent.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=25",
+                    "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(v)], check=True)
+    calls, loads = _patch(monkeypatch)
+    t = transcribe(v, tmp_path, "x", "int8", lambda f: None, lambda: False)
+    assert t.words == [] and loads == [] and calls == []
+    assert (tmp_path / "transcript.json").exists()
+
+
+def test_transcribe_multi_chunk_offsets_and_partial_resume(tmp_path, monkeypatch, tiny_video):
+    monkeypatch.setattr(tr, "CHUNK_SECONDS", 2)
+    seg = NS(start=0.1, end=0.5, text="x", words=[NS(start=0.1, end=0.5, word="x")])
+    calls, loads = _patch(monkeypatch, [seg])
+    chunks = tmp_path / "transcript_chunks"
+    chunks.mkdir()
+    Transcript("en", [Word(0.1, 0.5, "saved")], [Segment(0.1, 0.5, "saved")]).save(chunks / "0001.json")
+    prog = []
+    t = transcribe(tiny_video, tmp_path, "m", "int8", prog.append, lambda: False)
+    assert len(calls) == 2  # chunks 0 and 2 only
+    assert [(w.start, w.text) for w in t.words] == [(0.1, "x"), (2.1, "saved"), (4.1, "x")]
+    assert prog == [1 / 3, 2 / 3, 1.0]

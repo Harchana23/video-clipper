@@ -59,7 +59,12 @@ def transcribe(source: Path, job_dir: Path, model_name: str, compute_type: str,
         return Transcript.load(final)
     chunk_dir = job_dir / "transcript_chunks"
     chunk_dir.mkdir(parents=True, exist_ok=True)
-    total = max(1, math.ceil(probe(source).duration / CHUNK_SECONDS))
+    info = probe(source)
+    if not info.has_audio:
+        result = Transcript("en", [], [])
+        result.save(final)
+        return result
+    total = max(1, math.ceil(info.duration / CHUNK_SECONDS))
     model = None
     parts: list[tuple[float, Transcript]] = []
     try:
@@ -78,14 +83,14 @@ def transcribe(source: Path, job_dir: Path, model_name: str, compute_type: str,
                     # shortcut: words straddling a 600 s boundary may be cut; upgrade to
                     # silence-aligned chunk edges if it shows up in captions.
                     _extract_wav(source, offset, wav)
-                    segments, info = model.transcribe(str(wav), word_timestamps=True, vad_filter=True)
+                    segments, ginfo = model.transcribe(str(wav), word_timestamps=True, vad_filter=True)
                     words, segs = [], []
                     for s in segments:
                         segs.append(Segment(s.start, s.end, s.text.strip()))
                         words += [Word(w.start, w.end, w.word.strip()) for w in s.words or []]
                 finally:
                     wav.unlink(missing_ok=True)
-                t = Transcript(info.language, words, segs)
+                t = Transcript(ginfo.language, words, segs)
                 t.save(saved)
                 parts.append((offset, t))
             progress((i + 1) / total)
