@@ -62,6 +62,8 @@ def detect_faces(source: Path, start: float, end: float, fps: float = 5) -> list
         base_options=BaseOptions(model_asset_path=str(_ensure_model()), delegate=BaseOptions.Delegate.CPU),
     )
     cap = cv2.VideoCapture(str(source))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video for face detection: {source}")
     out: list[tuple[float, float | None]] = []
     try:
         with vision.FaceDetector.create_from_options(opts) as det:
@@ -85,7 +87,7 @@ def detect_faces(source: Path, start: float, end: float, fps: float = 5) -> list
 def scene_cuts(source: Path, start: float, end: float) -> list[float]:
     from scenedetect import ContentDetector, detect
 
-    scenes = detect(str(source), ContentDetector(), start_time=start, end_time=end)
+    scenes = detect(str(source), ContentDetector(), start_time=float(start), end_time=float(end))
     return [s[0].get_seconds() - start for s in scenes[1:]]
 
 
@@ -94,4 +96,5 @@ def plan_crop(source: Path, start: float, end: float, video_type: VideoType, inf
     if video_type == "gaming" or w / h <= 1.0:
         return CropPlan("fit", w, h, [])
     cuts = scene_cuts(source, start, end) if video_type == "movie" else []
-    return CropPlan("follow", w, h, smooth_track(detect_faces(source, start, end), w, crop_width(h), cuts))
+    samples = detect_faces(source, start, end) or [(0.0, None)]  # never emit a follow plan with no keys
+    return CropPlan("follow", w, h, smooth_track(samples, w, crop_width(h), cuts))

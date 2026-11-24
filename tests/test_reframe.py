@@ -52,3 +52,57 @@ def test_plan_crop_talk_follows(tiny_video):
 def test_detect_faces_finds_face(face_video):
     out = detect_faces(face_video, 0, 2)
     assert any(x is not None for _, x in out)
+
+
+class _TC:
+    def __init__(self, s):
+        self.s = s
+
+    def get_seconds(self):
+        return self.s
+
+
+def test_scene_cuts_uses_float_times_and_relative_cuts(monkeypatch):
+    import scenedetect
+
+    seen = {}
+
+    def fake(path, det, start_time, end_time):
+        seen.update(start=start_time, end=end_time)
+        return [(_TC(10.0), _TC(12.5)), (_TC(12.5), _TC(15.0)), (_TC(15.0), _TC(20.0))]
+
+    monkeypatch.setattr(scenedetect, "detect", fake)
+    from clipper.reframe import scene_cuts
+
+    assert scene_cuts("x.mp4", 10, 20) == [2.5, 5.0]
+    assert isinstance(seen["start"], float) and isinstance(seen["end"], float)
+
+
+def test_plan_crop_movie_passes_cuts_to_smoothing(monkeypatch, tiny_video):
+    import clipper.reframe as r
+
+    got = {}
+    real = r.smooth_track
+
+    def spy(s, w, cw, cuts, **k):
+        got["cuts"] = cuts
+        return real(s, w, cw, cuts, **k)
+
+    monkeypatch.setattr(r, "scene_cuts", lambda *a: [1.0, 3.0])
+    monkeypatch.setattr(r, "detect_faces", lambda *a: [(0.0, 500.0), (1.0, 900.0)])
+    monkeypatch.setattr(r, "smooth_track", spy)
+    p = r.plan_crop(tiny_video, 0, 4, "movie", probe(tiny_video))
+    assert p.mode == "follow" and p.keys and got["cuts"] == [1.0, 3.0]
+
+
+def test_plan_crop_zero_samples_falls_back_to_centre(monkeypatch, tiny_video):
+    import clipper.reframe as r
+
+    monkeypatch.setattr(r, "detect_faces", lambda *a: [])
+    p = r.plan_crop(tiny_video, 0, 4, "talk", probe(tiny_video))
+    assert [k.x for k in p.keys] == [(1280 - crop_width(720)) // 2]
+
+
+def test_detect_faces_raises_on_unopenable_source(tmp_path):
+    with pytest.raises(RuntimeError):
+        detect_faces(tmp_path / "missing.mp4", 0, 1)
