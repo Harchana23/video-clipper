@@ -11,13 +11,13 @@ In PowerShell, from this folder:
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-It installs what is missing (Python 3.12, ffmpeg, Ollama), builds `.venv`, pulls the model, asks for the admin password, writes `config.toml`, and registers the "Video Clipper" scheduled task (needs an administrator PowerShell; add `-SkipTask` to skip it). Re-running is safe. `-ResetPassword` changes the password.
+It installs what is missing (Python 3.12, ffmpeg, Ollama), builds `.venv`, pulls the model, asks for the admin password, writes `config.toml`, and registers two scheduled tasks, "Video Clipper Ollama" and "Video Clipper", that both start at boot (needs an elevated PowerShell; add `-SkipTask` to skip them). The tasks run whether or not you are logged in, and no Windows password is stored (S4U logon). Re-running is safe. `-ResetPassword` changes the password.
 
 ## Start and stop
 
 - Manually: `.venv\Scripts\python -m clipper.cli serve`, then open http://127.0.0.1:8765. Stop with Ctrl+C.
-- Scheduled task (starts at boot): `Start-ScheduledTask "Video Clipper"` / `Stop-ScheduledTask "Video Clipper"`.
-  Remove it with `Unregister-ScheduledTask "Video Clipper" -Confirm:$false`.
+- Scheduled tasks (start at boot): `Start-ScheduledTask "Video Clipper Ollama"; Start-ScheduledTask "Video Clipper"`, stop with `Stop-ScheduledTask`.
+  Remove them with `Unregister-ScheduledTask "Video Clipper", "Video Clipper Ollama" -Confirm:$false`.
 
 The server only listens on 127.0.0.1. Logs for failed jobs are in `<data_dir>\logs\worker.log`.
 
@@ -30,6 +30,8 @@ tailscale serve --bg 8765
 ```
 
 Open `https://<machine>.<tailnet>.ts.net` from the other device and sign in. Only your devices can reach it.
+
+Keep `cookie_secure = true` in `config.toml` (Tailscale serve is HTTPS). For plain-http local use, Chrome and Edge accept the secure cookie on 127.0.0.1; in any other browser set `cookie_secure = false`.
 
 ## Moving to the Acer Nitro 5
 

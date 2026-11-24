@@ -66,6 +66,7 @@ if ((Test-Path $Config) -and -not $ResetPassword) {
 } else {
     if ($PasswordFromEnv) {
         $plain = $env:CLIPPER_ADMIN_PASSWORD
+        Remove-Item Env:CLIPPER_ADMIN_PASSWORD -ErrorAction SilentlyContinue  # do not leave it in this process's environment
         if (-not $plain) { throw 'CLIPPER_ADMIN_PASSWORD is empty.' }
     } else {
         $a = Read-Host 'Choose the admin password' -AsSecureString
@@ -80,16 +81,18 @@ if ((Test-Path $Config) -and -not $ResetPassword) {
         }
         if (-not $plain) { throw 'The password is empty.' }
     }
-    # the password goes in on stdin, never on a command line
-    $hash = ($plain | & $Py -c "import sys; from clipper.auth import hash_password; print(hash_password(sys.stdin.readline().rstrip('\r\n')))").Trim()
+    # the password goes in on stdin as UTF-8 bytes (PS 5.1 would pipe ASCII and turn non-ASCII into '?'), never on a command line
+    $OutputEncoding = New-Object Text.UTF8Encoding $false
+    $hash = ($plain | & $Py -c "import sys; from clipper.auth import hash_password; print(hash_password(sys.stdin.buffer.read().rstrip(b'
+').decode('utf-8')))").Trim()
     if ($LASTEXITCODE -ne 0 -or -not $hash) { throw 'Could not hash the password.' }
     $secret = (& $Py -c "import secrets; print(secrets.token_urlsafe(32))").Trim()
     $plain = $null
 
     if (Test-Path $Config) {  # -ResetPassword: keep the owner's other settings
-        $text = Get-Content $Config -Raw
+        $text = [IO.File]::ReadAllText($Config, (New-Object Text.UTF8Encoding $false))
     } else {
-        $text = Get-Content (Join-Path $Repo 'config.example.toml') -Raw
+        $text = [IO.File]::ReadAllText((Join-Path $Repo 'config.example.toml'), (New-Object Text.UTF8Encoding $false))
         $dataDir = (Join-Path $Repo 'data') -replace '\\', '/'
         $text = $text -replace '(?m)^data_dir\s*=\s*"[^"]*"', ('data_dir = "' + $dataDir + '"')
     }
@@ -112,7 +115,7 @@ Run-Native $Py -c "from pathlib import Path; from clipper.config import load_set
 if ($SkipTask) {
     Write-Host "`nSkipping the scheduled task (-SkipTask)."
 } else {
-    Step 'Scheduled task "Video Clipper"'
+    Step 'Scheduled tasks'
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) { throw 'Registering the task needs an elevated PowerShell (Run as administrator), or re-run with -SkipTask.' }
     $action = New-ScheduledTaskAction -Execute $Py -Argument "-m clipper.cli serve --config `"$Config`"" -WorkingDirectory $Repo
@@ -122,7 +125,10 @@ if ($SkipTask) {
     # S4U: runs whether or not the user is logged on, without storing a password
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
     Register-ScheduledTask -TaskName 'Video Clipper' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-    Write-Host 'Registered. It starts at boot; start it now with: Start-ScheduledTask "Video Clipper"'
+    # Ollama must also be up at boot, or moment-finding fails until someone logs in
+    $oAction = New-ScheduledTaskAction -Execute $Ollama -Argument 'serve'
+    Register-ScheduledTask -TaskName 'Video Clipper Ollama' -Action $oAction -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    Write-Host 'Registered "Video Clipper Ollama" and "Video Clipper"; both start at boot. Start now with: Start-ScheduledTask "Video Clipper Ollama"; Start-ScheduledTask "Video Clipper"'
 }
 
 Write-Host @"
